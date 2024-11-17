@@ -62,64 +62,92 @@ def _warmup_beta(beta_start, beta_end, num_diffusion_timesteps, warmup_frac):
     return betas
 
 
-def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
+def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, beta_start=0.0001, beta_end=0.02):
     """
-    This is the deprecated API for creating beta schedules.
-    See get_named_beta_schedule() for the new library of schedules.
-    """
-    if beta_schedule == "quad":
-        betas = (
-            np.linspace(
-                beta_start ** 0.5,
-                beta_end ** 0.5,
-                num_diffusion_timesteps,
-                dtype=np.float64,
-            )
-            ** 2
-        )
-    elif beta_schedule == "linear":
-        betas = np.linspace(beta_start, beta_end, num_diffusion_timesteps, dtype=np.float64)
-    elif beta_schedule == "warmup10":
-        betas = _warmup_beta(beta_start, beta_end, num_diffusion_timesteps, 0.1)
-    elif beta_schedule == "warmup50":
-        betas = _warmup_beta(beta_start, beta_end, num_diffusion_timesteps, 0.5)
-    elif beta_schedule == "const":
-        betas = beta_end * np.ones(num_diffusion_timesteps, dtype=np.float64)
-    elif beta_schedule == "jsd":  # 1/T, 1/(T-1), 1/(T-2), ..., 1
-        betas = 1.0 / np.linspace(
-            num_diffusion_timesteps, 1, num_diffusion_timesteps, dtype=np.float64
-        )
-    else:
-        raise NotImplementedError(beta_schedule)
-    assert betas.shape == (num_diffusion_timesteps,)
-    return betas
+    获取预定义的 beta 调度器。
 
+    支持 'linear' 和 'squaredcos_cap_v2' 两种调度器。
 
-def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
-    """
-    Get a pre-defined beta schedule for the given name.
-    The beta schedule library consists of beta schedules which remain similar
-    in the limit of num_diffusion_timesteps.
-    Beta schedules may be added, but should not be removed or changed once
-    they are committed to maintain backwards compatibility.
+    Args:
+        schedule_name (str): 调度器名称，支持 'linear' 和 'squaredcos_cap_v2'。
+        num_diffusion_timesteps (int): 扩散步骤数。
+        beta_start (float, optional): 起始 beta 值，仅对 'linear' 有效。默认值为 0.0001。
+        beta_end (float, optional): 结束 beta 值，仅对 'linear' 有效。默认值为 0.02。
+
+    Returns:
+        np.ndarray: 生成的 beta 调度序列。
     """
     if schedule_name == "linear":
-        # Linear schedule from Ho et al, extended to work for any number of
-        # diffusion steps.
-        scale = 1000 / num_diffusion_timesteps
-        return get_beta_schedule(
-            "linear",
-            beta_start=scale * 0.0001,
-            beta_end=scale * 0.02,
-            num_diffusion_timesteps=num_diffusion_timesteps,
-        )
+        # 线性调度，从 beta_start 线性增长到 beta_end
+        betas = np.linspace(beta_start, beta_end, num_diffusion_timesteps, dtype=np.float64)
     elif schedule_name == "squaredcos_cap_v2":
-        return betas_for_alpha_bar(
+        betas = betas_for_alpha_bar(
             num_diffusion_timesteps,
             lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2,
         )
     else:
         raise NotImplementedError(f"unknown beta schedule: {schedule_name}")
+    
+    assert betas.shape == (num_diffusion_timesteps,), "Beta schedule shape mismatch."
+    return betas
+# def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
+#     """
+#     This is the deprecated API for creating beta schedules.
+#     See get_named_beta_schedule() for the new library of schedules.
+#     """
+#     if beta_schedule == "quad":
+#         betas = (
+#             np.linspace(
+#                 beta_start ** 0.5,
+#                 beta_end ** 0.5,
+#                 num_diffusion_timesteps,
+#                 dtype=np.float64,
+#             )
+#             ** 2
+#         )
+#     elif beta_schedule == "linear":
+#         betas = np.linspace(beta_start, beta_end, num_diffusion_timesteps, dtype=np.float64)
+#     elif beta_schedule == "warmup10":
+#         betas = _warmup_beta(beta_start, beta_end, num_diffusion_timesteps, 0.1)
+#     elif beta_schedule == "warmup50":
+#         betas = _warmup_beta(beta_start, beta_end, num_diffusion_timesteps, 0.5)
+#     elif beta_schedule == "const":
+#         betas = beta_end * np.ones(num_diffusion_timesteps, dtype=np.float64)
+#     elif beta_schedule == "jsd":  # 1/T, 1/(T-1), 1/(T-2), ..., 1
+#         betas = 1.0 / np.linspace(
+#             num_diffusion_timesteps, 1, num_diffusion_timesteps, dtype=np.float64
+#         )
+#     else:
+#         raise NotImplementedError(beta_schedule)
+#     assert betas.shape == (num_diffusion_timesteps,)
+#     return betas
+
+
+# def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
+#     """
+#     Get a pre-defined beta schedule for the given name.
+#     The beta schedule library consists of beta schedules which remain similar
+#     in the limit of num_diffusion_timesteps.
+#     Beta schedules may be added, but should not be removed or changed once
+#     they are committed to maintain backwards compatibility.
+#     """
+#     if schedule_name == "linear":
+#         # Linear schedule from Ho et al, extended to work for any number of
+#         # diffusion steps.
+#         scale = 1000 / num_diffusion_timesteps
+#         return get_beta_schedule(
+#             "linear",
+#             beta_start=scale * 0.0001,
+#             beta_end=scale * 0.02,
+#             num_diffusion_timesteps=num_diffusion_timesteps,
+#         )
+#     elif schedule_name == "squaredcos_cap_v2":
+#         return betas_for_alpha_bar(
+#             num_diffusion_timesteps,
+#             lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2,
+#         )
+#     else:
+#         raise NotImplementedError(f"unknown beta schedule: {schedule_name}")
 
 
 def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
@@ -712,7 +740,7 @@ class GaussianDiffusion:
         output = th.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, lq=None):
         """
         Compute training losses for a single timestep.
         :param model: the model to evaluate loss on.
@@ -745,7 +773,6 @@ class GaussianDiffusion:
                 terms["loss"] *= self.num_timesteps
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
             model_output = model(x_t, t, **model_kwargs)
-
             if self.model_var_type in [
                 ModelVarType.LEARNED,
                 ModelVarType.LEARNED_RANGE,
