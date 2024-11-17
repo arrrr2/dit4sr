@@ -1,4 +1,4 @@
 vae/
-*log*
+log.txt
 *.pyc
 *.png
