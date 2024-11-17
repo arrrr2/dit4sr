@@ -13,9 +13,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torchvision.datasets import ImageFolder
-from torchvision import transforms
 from basicsr.data.realesrgan_dataset import RealESRGANDataset
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 import numpy as np
 from collections import OrderedDict
 from PIL import Image
@@ -134,8 +133,9 @@ def main(args):
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
-    sch = torch.optim.lr_scheduler.StepLR(opt, step_size=10000, gamma=0.95)
-    
+    warmup_scheduler = LinearLR(opt, start_factor=0.1, end_factor=1.0, total_iters=20000)
+    annealing_scheduler = CosineAnnealingLR(opt, T_max=400000, eta_min=0.00001)
+    sch = SequentialLR(opt, schedulers=[warmup_scheduler, annealing_scheduler], milestones=[20000])
 
     dataset_conf = OmegaConf.load("./baseline.yaml")
     dataset = RealESRGANDataset(dataset_conf)
