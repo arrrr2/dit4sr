@@ -139,7 +139,10 @@ def main(args):
 
     dataset_conf = OmegaConf.load("./baseline.yaml")
     dataset = RealESRGANDataset(dataset_conf)
- 
+    
+
+    model = torch.compile(model, mode="max-autotune")
+    vae.encode = torch.compile(vae.encode, fullgraph=True, mode="max-autotune")
 
     sampler = DistributedSampler(
         dataset,
@@ -188,7 +191,7 @@ def main(args):
                 y = ff.interpolate(y, x.size(2), mode="nearest")
                 with torch.no_grad():
                     # Map input images to latent space 
-                    x, y = vae.encode(x).latent_dist.mode(), vae.encode(y).latent_dist.sample()
+                    x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.sample().clone()
                     x, y = pin(x), pin(y)
 
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
@@ -199,7 +202,7 @@ def main(args):
             scaler.step(opt)
             scaler.update()
             sch.step()
-            if log_steps % 10 == 0: update_ema(ema, model.module)
+            update_ema(ema, model.module)
 
             # Log loss values:
             running_loss += loss.item()
@@ -249,7 +252,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=12222)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=6)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=100_000)
     args = parser.parse_args()
