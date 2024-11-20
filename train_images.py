@@ -140,9 +140,9 @@ def main(args):
     dataset_conf = OmegaConf.load("./baseline.yaml")
     dataset = RealESRGANDataset(dataset_conf)
     
-
-    model = torch.compile(model, mode="max-autotune")
-    vae.encode = torch.compile(vae.encode, fullgraph=True, mode="max-autotune")
+    if args.compile:
+        model = torch.compile(model, mode="max-autotune")
+        vae.encode = torch.compile(vae.encode, fullgraph=True, mode="max-autotune")
 
     sampler = DistributedSampler(
         dataset,
@@ -250,6 +250,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XXS/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--compile", action="store_true", help="Enable compilation")
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=12222)
     parser.add_argument("--num-workers", type=int, default=6)
