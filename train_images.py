@@ -191,7 +191,7 @@ def main(args):
                 y = ff.interpolate(y, x.size(2), mode="nearest")
                 with torch.no_grad():
                     # Map input images to latent space 
-                    x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
+                    x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
                     x, y = pin(x), pin(y)
 
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
