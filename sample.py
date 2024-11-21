@@ -29,7 +29,7 @@ def main(args):
     # Setup PyTorch:
     torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
-    device = "cuda:7" if torch.cuda.is_available() else "cpu"
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     if args.ckpt is None:
         assert args.model == "DiT-XXS/2", "Only DiT-XL/2 models are available for auto-download."
@@ -63,7 +63,7 @@ def main(args):
     ])
 
     dataset = CustomDataset(args.in_path, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=4)
 
     # Load model:
     latent_size = args.image_size // 8
@@ -108,12 +108,11 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XXS/2")
     parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="mse")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
-    parser.add_argument("--cfg-scale", type=float, default=4.0)
-    parser.add_argument("--num-sampling-steps", type=int, default=20)
+    parser.add_argument("--num-sampling-steps", type=int, default=250)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--ckpt", type=str, default="./results/005-DiT-XXS-2/checkpoints/0200000.pt",
+    parser.add_argument("--ckpt", type=str, default="./results/000-DiT-XXS-2/checkpoints/0300000.pt",
                         help="Optional path to a DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).")
     parser.add_argument("--in-path", type=str, default="/home/ubuntu/data/repos/ResShift/testdata/Val_SR/lq")
-    parser.add_argument("--out-path", type=str, default="/home/ubuntu/data/repos/ResShift/testdata/Val_SR/dit")
+    parser.add_argument("--out-path", type=str, default="/home/ubuntu/data/repos/ResShift/testdata/Val_SR/dit300k")
     args = parser.parse_args()
     main(args)
