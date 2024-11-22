@@ -191,7 +191,8 @@ def main(args):
                 y = ff.interpolate(y, x.size(2), mode="nearest")
                 with torch.no_grad():
                     # Map input images to latent space 
-                    x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
+                    if args.sample: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
+                    else: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
                     x, y = pin(x), pin(y)
 
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
@@ -251,6 +252,7 @@ if __name__ == "__main__":
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--compile", action="store_true", help="Enable compilation")
+    parser.add_argument("--sample", action="store_true", help="using sample mode")
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=12222)
     parser.add_argument("--num-workers", type=int, default=6)
