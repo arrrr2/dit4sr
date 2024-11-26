@@ -21,7 +21,7 @@ import argparse
 import torchvision
 from PIL import Image
 import os
-
+from sd3_impls import SD3LatentFormat
 
 
 
@@ -79,13 +79,17 @@ def main(args):
     vae = AutoencoderKL.from_pretrained(f"./vae").to(device)
     t2p = torchvision.transforms.ToPILImage()
 
+    pout = SD3LatentFormat().process_out
+    pin = SD3LatentFormat().process_in
+
     # Labels to condition the model with (feel free to change):
     # Create sampling noise:
     for batch in dataloader:
         images = batch['img'].to(device)
         paths = batch['pat']
         images = torch.nn.functional.interpolate(images, scale_factor=4, mode='nearest')
-        latents = vae.encode(images).latent_dist.sample()
+        latents = vae.encode(images).latent_dist.mode()
+        latents = pin(latents)
 
         z = torch.randn(len(images), 16, latent_size, latent_size, device=device)
         model_kwargs = dict(y=latents)
@@ -94,6 +98,7 @@ def main(args):
             samples = diffusion.p_sample_loop(
                 model.forward, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device
             )
+            samples = pout(samples)
             samples = vae.decode(samples).sample / 2 + 0.5
             samples = samples.clamp(0, 1)
 

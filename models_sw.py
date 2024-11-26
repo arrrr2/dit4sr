@@ -13,13 +13,15 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
-
-
+from timm.models.vision_transformer import PatchEmbed, Mlp, Attention
+from torch.jit import Final
+from timm.layers import use_fused_attn
+import torch.nn.functional as F
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
+    
 #################################################################################
 #               Embedding Layers for Timesteps and Class Labels                 #
 #################################################################################
@@ -102,10 +104,10 @@ class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, fused_attn=None, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, fused_attn=fused_attn, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -155,7 +157,9 @@ class DiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
+        roll_size=32,
         learn_sigma=True,
+        fused_attn=None,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -163,6 +167,7 @@ class DiT(nn.Module):
         self.out_channels = in_channels  if learn_sigma else in_channels // 2
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.roll_size = roll_size
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -171,7 +176,7 @@ class DiT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
+            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, fused_attn=fused_attn) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
@@ -240,6 +245,7 @@ class DiT(nn.Module):
         c = t                              #     (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
+            x = torch.roll(x, shifts=self.roll_size, dims=1)
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         return x
@@ -359,16 +365,19 @@ DiT_models = {
     'DiT-XS/2': DiT_XS_2,  'DiT-XXS/2': DiT_XXS_2,  'DiT-XXS/1': DiT_XXS_1,
 }
 
+
 if __name__=="__main__":
-    model = DiT_B_2()
+    model = DiT_B_4(fused_attn=False)
     from torch.utils.flop_counter import FlopCounterMode
 
     input = torch.randn(1, 16, 32, 32)
-    y = torch.randn(1, 16, 32, 32)
-    t = torch.randn(1)
+    y = torch.randn(1, 16, 32, 32, device='cpu')
+    t = torch.randn(1, device='cpu')
 
     
-    with FlopCounterMode(depth=5):
+    with FlopCounterMode(depth=4):
         model(input, t, y=y)
 
     
+
+
