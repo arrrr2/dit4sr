@@ -84,6 +84,33 @@ def create_logger(logging_dir):
 
 
 
+def non_uniform_sampler(batch_size, T, t_delta, p, device):
+    """
+    Samples timesteps non-uniformly based on specified probabilities for significant and non-significant intervals.
+    
+    Parameters:
+    - batch_size: Number of timesteps to sample.
+    - T: Total number of timesteps.
+    - t_delta: Timestep at which to split intervals.
+    - p: Probability weight for the significant interval.
+    - device: Device to use for tensor operations.
+    
+    Returns:
+    - A tensor of sampled timesteps.
+    """
+    weight_first = t_delta * p
+    weight_second = (T - t_delta) * (1 - p)
+    total_weight = weight_first + weight_second
+    prob_first = weight_first / total_weight if total_weight > 0 else 0.0
+    prob_second = weight_second / total_weight if total_weight > 0 else 1.0
+    
+    choices = torch.rand(batch_size, device=device) < prob_first
+    t_significant = torch.randint(0, t_delta, (batch_size,), device=device)
+    t_non_significant = torch.randint(t_delta, T, (batch_size,), device=device)
+    t = torch.where(choices, t_significant, t_non_significant)
+    return t
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -195,7 +222,8 @@ def main(args):
                     else: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
                     x, y = pin(x), pin(y)
 
-                t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
+                # t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
+                t = non_uniform_sampler(x.shape[0], diffusion.num_timesteps, args.bernoulli_mid, args.bernoulli_p, device)
                 model_kwargs = dict(y=y)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
                 loss = loss_dict["loss"].mean()
@@ -252,11 +280,13 @@ if __name__ == "__main__":
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--compile", action="store_true", help="Enable compilation")
-    parser.add_argument("--sample", action="store_true", help="using sample mode")
+    parser.add_argument("--sample", action="store_false", help="using sample mode (default)")
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=12222)
     parser.add_argument("--num-workers", type=int, default=6)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=100_000)
+    parser.add_argument("--bernoulli-mid", type=int, default=500)
+    parser.add_argument("--bernoulli-p", type=float, default=0.5)
     args = parser.parse_args()
     main(args)

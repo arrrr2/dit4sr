@@ -35,6 +35,8 @@ def main(args):
         assert args.model == "DiT-XXS/2", "Only DiT-XL/2 models are available for auto-download."
         assert args.image_size in [256, 512]
     out_path = args.out_path
+    if not os.path.exists(out_path):
+        os.makedirs(out_path, exist_ok=True)
 
 
     class CustomDataset(torch.utils.data.Dataset):
