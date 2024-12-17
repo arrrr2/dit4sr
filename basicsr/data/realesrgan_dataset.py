@@ -105,6 +105,8 @@ class RealESRGANDataset(data.Dataset):
     
     @torch.no_grad()
     def __getitem__(self, index):
+        self.gt_size = self.opt['gt_size']
+        gt_size = self.gt_size
 
         if self.file_client is None:
             self.file_client = FileClient(self.io_backend_opt.pop('type'), **self.io_backend_opt)
@@ -144,35 +146,37 @@ class RealESRGANDataset(data.Dataset):
             raise ValueError(f'Unexpected value {self.mode} for mode parameter')
 
         if self.mode == 'training':
-            # -------------------- Do augmentation for training: flip, rotation -------------------- #
-            img_gt = augment(img_gt, self.opt['use_hflip'], self.opt['use_rot'])
-
-            # crop or pad to 400
-            # TODO: 400 is hard-coded. You may change it accordingly
+            
             h, w = img_gt.shape[0:2]
             if self.rescale_gt:
                 crop_pad_size = max(min(h, w), self.opt['gt_size'])
             else:
                 crop_pad_size = self.opt['crop_pad_size']
-            # pad
-            # if h < crop_pad_size or w < crop_pad_size:
-                # pad_h = max(0, crop_pad_size - h)
-                # pad_w = max(0, crop_pad_size - w)
-                # img_gt = cv2.copyMakeBorder(img_gt, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
-            while h < crop_pad_size or w < crop_pad_size:
-                pad_h = min(max(0, crop_pad_size - h), h)
-                pad_w = min(max(0, crop_pad_size - w), w)
-                img_gt = cv2.copyMakeBorder(img_gt, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
-                h, w = img_gt.shape[0:2]
-            # crop
+
+            # 1st: crop to not larger than crop_pad_size
             if img_gt.shape[0] > crop_pad_size or img_gt.shape[1] > crop_pad_size:
                 h, w = img_gt.shape[0:2]
                 # randomly choose top and left coordinates
                 top = random.randint(0, h - crop_pad_size)
                 left = random.randint(0, w - crop_pad_size)
                 img_gt = img_gt[top:top + crop_pad_size, left:left + crop_pad_size, ...]
+
+            # 2nd: flip and rotation
+            img_gt = augment(img_gt, self.opt['use_hflip'], self.opt['use_rot'])
+            h, w = img_gt.shape[0:2]
+
+
+
+            while h < crop_pad_size or w < crop_pad_size:
+                pad_h = min(max(0, crop_pad_size - h), h)
+                pad_w = min(max(0, crop_pad_size - w), w)
+                img_gt = cv2.copyMakeBorder(img_gt, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
+                h, w = img_gt.shape[0:2]
+            # crop
+
             if self.rescale_gt and crop_pad_size != self.opt['gt_size']:
                 img_gt = cv2.resize(img_gt, dsize=(self.opt['gt_size'],)*2, interpolation=cv2.INTER_AREA)
+
         elif self.mode == 'testing':
             pass
         else:

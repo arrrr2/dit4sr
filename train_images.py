@@ -119,6 +119,7 @@ def main(args):
     """
     Trains a new DiT model.
     """
+    print(str(args))
     assert torch.cuda.is_available(), "Training currently requires at least one GPU."
 
     # Setup DDP:
@@ -141,6 +142,7 @@ def main(args):
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
+        logger.info(str(args))
     else:
         logger = create_logger(None)
 
@@ -164,11 +166,11 @@ def main(args):
     annealing_scheduler = CosineAnnealingLR(opt, T_max=400000, eta_min=0.00001)
     sch = SequentialLR(opt, schedulers=[warmup_scheduler, annealing_scheduler], milestones=[20000])
 
-    dataset_conf = OmegaConf.load("./baseline.yaml")
+    dataset_conf = OmegaConf.load(args.dataset)
     dataset = RealESRGANDataset(dataset_conf)
     
     if args.compile:
-        model = torch.compile(model, mode="max-autotune")
+        model = torch.compile(model,  mode="max-autotune")
         vae.encode = torch.compile(vae.encode, fullgraph=True, mode="max-autotune")
 
     sampler = DistributedSampler(
@@ -206,8 +208,8 @@ def main(args):
 
 
 
-    logger.info(f"Training for {args.epochs} epochs...")
-    for epoch in range(args.epochs):
+    logger.info(f"Training for {args.iters} iterss...")
+    for epoch in range(100000000000):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
         for x, y in loader:
@@ -218,8 +220,8 @@ def main(args):
                 y = ff.interpolate(y, x.size(2), mode="nearest")
                 with torch.no_grad():
                     # Map input images to latent space 
-                    if args.sample: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
-                    else: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
+                    if args.no_sample: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
+                    else: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
                     x, y = pin(x), pin(y)
 
                 # t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
@@ -264,6 +266,9 @@ def main(args):
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                 dist.barrier()
+            
+        if train_steps >= args.iters:
+            break
 
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
@@ -276,11 +281,12 @@ if __name__ == "__main__":
     # Default args here will train DiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", type=str, default="results")
+    parser.add_argument("--dataset", type=str, default="baseline.yaml")
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-S/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--iters", type=int, default=600_000)
     parser.add_argument("--compile", action="store_true", help="Enable compilation")
-    parser.add_argument("--sample", action="store_false", help="using sample mode (default)")
+    parser.add_argument("--no_sample", action="store_true", help="not using sample mode")
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=12222)
     parser.add_argument("--num-workers", type=int, default=6)
