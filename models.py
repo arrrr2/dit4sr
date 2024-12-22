@@ -333,6 +333,9 @@ def DiT_B_4(**kwargs):
 def DiT_B_8(**kwargs):
     return DiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
 
+def DiT_M_2(**kwargs):
+    return DiT(depth=24, hidden_size=384, patch_size=2, num_heads=8, **kwargs)
+
 def DiT_S_2(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
 
@@ -356,7 +359,7 @@ DiT_models = {
     'DiT-L/2':  DiT_L_2,   'DiT-L/4':  DiT_L_4,   'DiT-L/8':  DiT_L_8,
     'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
     'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8,
-    'DiT-XS/2': DiT_XS_2,  'DiT-XXS/2': DiT_XXS_2,  'DiT-XXS/1': DiT_XXS_1,
+    'DiT-XS/2': DiT_XS_2,  'DiT-XXS/2': DiT_XXS_2,  'DiT-XXS/1': DiT_XXS_1, 'DiT-M/2': DiT_M_2,
 }
 
 if __name__=="__main__":
