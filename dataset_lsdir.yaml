@@ -20,9 +20,6 @@ degradation:
   gray_noise_prob2: 0.4
   jpeg_range2: [30, 95]
 
-  gt_size: 256 
-  resize_back: False
-  use_sharp: False
 
 data:
   train:
@@ -57,18 +54,3 @@ data:
       use_hflip: True
       use_rot: True
       rescale_gt: False
-  val:
-    type: base
-    params:
-      dir_path: testdata/Val_SR/lq
-      im_exts: png
-      transform_type: default
-      transform_kwargs:
-          mean: 0.5
-          std: 0.5
-      extra_dir_path: testdata/Val_SR/gt
-      extra_transform_type: default
-      extra_transform_kwargs:
-          mean: 0.5
-          std: 0.5
-      recursive: False

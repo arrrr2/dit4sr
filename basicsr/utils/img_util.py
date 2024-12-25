@@ -127,7 +127,7 @@ def imfrombytes(content, flag='color', float32=False):
     img_np = np.frombuffer(content, np.uint8)
     imread_flags = {'color': cv2.IMREAD_COLOR, 'grayscale': cv2.IMREAD_GRAYSCALE, 'unchanged': cv2.IMREAD_UNCHANGED}
     img = cv2.imdecode(img_np, imread_flags[flag])
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     if float32:
         img = img.astype(np.float32) / 255.
     return img

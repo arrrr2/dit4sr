@@ -86,21 +86,21 @@ def process_single_image(image_path, input_dir, output_dir, window_size, overlap
             if not crops:
                 return False
             
-            # 计算相对路径以保留子文件夹结构
-            relative_path = image_path.relative_to(input_dir)
-            relative_dir = relative_path.parent
+            # # 计算相对路径以保留子文件夹结构
+            # relative_path = image_path.relative_to(input_dir)
+            # relative_dir = relative_path.parent
             
-            # 创建对应的输出子目录
-            save_dir = output_dir / relative_dir
-            save_dir.mkdir(parents=True, exist_ok=True)
+            # # 创建对应的输出子目录
+            # save_dir = output_dir / relative_dir
+            # save_dir.mkdir(parents=True, exist_ok=True)
             
-            # 保存裁剪后的图片
-            base_name = image_path.stem
-            ext = image_path.suffix
-            for crop, x, y in crops:
-                crop_name = f"{base_name}_x{x}_y{y}{ext}"
-                crop_path = save_dir / crop_name
-                crop.save(crop_path, compress_level=0)
+            # # 保存裁剪后的图片
+            # base_name = image_path.stem
+            # ext = image_path.suffix
+            # for crop, x, y in crops:
+            #     crop_name = f"{base_name}_x{x}_y{y}{ext}"
+            #     crop_path = save_dir / crop_name
+            #     crop.save(crop_path, compress_level=0)
         
         return True
     except Exception as e:
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     parser.add_argument('output_dir', type=str, help='输出目录路径')
     parser.add_argument('--window_size', type=int, default=512, help='裁剪窗口大小（默认: 512）')
     parser.add_argument('--overlap', type=int, default=128, help='窗口重叠大小（默认: 128）')
-    parser.add_argument('--num_processes', type=int, default=4, help='使用的进程数（默认: 4）')
+    parser.add_argument('--num_processes', type=int, default=128, help='使用的进程数（默认: 4）')
     
     args = parser.parse_args()
     

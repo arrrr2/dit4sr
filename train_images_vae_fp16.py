@@ -31,7 +31,6 @@ from diffusers.models import AutoencoderKL
 from omegaconf import OmegaConf
 from torch.amp import autocast, GradScaler
 from sd3_impls import SD3LatentFormat
-torch.set_num_threads(4)
 
 scaler = GradScaler("cuda", enabled=True)
 #################################################################################
@@ -50,6 +49,8 @@ def update_ema(ema_model, model, decay=0.999):
         # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
+t32 = lambda x: x.to(torch.float32)
+t16 = lambda x: x.to(torch.float16)
 
 def requires_grad(model, flag=True):
     """
@@ -57,7 +58,6 @@ def requires_grad(model, flag=True):
     """
     for p in model.parameters():
         p.requires_grad = flag
-
 
 def cleanup():
     """
@@ -158,7 +158,7 @@ def main(args):
     requires_grad(ema, False)
     model = DDP(model.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="", diffusion_steps=1000)  # default: 1000 steps, linear noise schedule
-    vae = AutoencoderKL.from_pretrained(f"./vae").to(device)
+    vae = AutoencoderKL.from_pretrained(f"./vae", torch_dtype=torch.float16).to(device)
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
@@ -209,22 +209,32 @@ def main(args):
 
 
 
+    tok = time()
     logger.info(f"Training for {args.iters} iterss...")
     for epoch in range(100000000000):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
-        for x, y in loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-            opt.zero_grad()
-            with torch.autocast("cuda", enabled=True):
-                y = ff.interpolate(y, x.size(2), mode="nearest")
-                with torch.no_grad():
-                    # Map input images to latent space 
-                    if args.no_sample: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
-                    else: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
-                    x, y = pin(x), pin(y)
+        for batch in loader:
+            tik = time()
 
+            # print(f"Time to load batch: {tik - tok}")
+
+            imgs = dataset.degrade_fun(batch['gt'].to(device, non_blocking=True), batch['kernel1'].to(device, non_blocking=True),\
+                                        batch['kernel2'].to(device, non_blocking=True), batch['sinc_kernel'].to(device, non_blocking=True))
+            x, y = imgs['gt'], imgs['lq']
+            # x = x.to(device, non_blocking=True)
+            # y = y.to(device, non_blocking=True)
+            opt.zero_grad()
+            with torch.no_grad():
+                # Map input images to latent space 
+                x, y = t16(x), t16(y)
+                y = ff.interpolate(y, x.size(2), mode="nearest")
+                if args.no_sample: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
+                else: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
+                x, y = pin(x), pin(y)
+                x, y = t32(x), t32(y)
+            with torch.autocast("cuda", enabled=True):
+                
                 # t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 t = non_uniform_sampler(x.shape[0], diffusion.num_timesteps, args.bernoulli_mid, args.bernoulli_p, device)
                 model_kwargs = dict(y=y)
@@ -267,7 +277,9 @@ def main(args):
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                 dist.barrier()
-            
+
+            tok = time()
+            # print(f"Time to process batch: {tok - tik}")
         if train_steps >= args.iters:
             break
 

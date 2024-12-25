@@ -5,6 +5,7 @@
 
 
 import math
+import torch
 
 import numpy as np
 import torch as th
@@ -884,6 +885,448 @@ class GaussianDiffusion:
             "xstart_mse": xstart_mse,
             "mse": mse,
         }
+        
+    def get_patches(self, x, patch_size, stride):
+        """
+        将图像分割成重叠的小块。
+
+        Args:
+            x: 待分割的图像张量，形状为 (N, C, H, W)。
+            patch_size: 小块的大小 (假设小块是正方形的)。
+            stride: 步长。
+
+        Returns:
+            patches: 分割后的小块张量，形状为 (num_patches, C, patch_size, patch_size)。
+            patch_coords: 每个小块的坐标列表，每个坐标是一个元组 (row_start, col_start)。
+        """
+        n, c, h, w = x.shape
+        assert n == 1, "Batch size must be 1 for patch aggregation."
+
+        patches = []
+        patch_coords = []
+
+        for i in range(0, h - patch_size + 1, stride):
+            for j in range(0, w - patch_size + 1, stride):
+                patch = x[:, :, i:i+patch_size, j:j+patch_size]
+                patches.append(patch)
+                patch_coords.append((i, j))
+
+        patches = th.cat(patches, dim=0)
+
+        return patches, patch_coords
+
+    def aggregate_patches(self, patches, patch_coords, full_size, patch_size, sigma=4.0):
+        """
+        将小块聚合回完整图像。
+
+        Args:
+            patches: 小块张量，形状为 (num_patches, C, patch_size, patch_size)。
+            patch_coords: 每个小块的坐标列表，每个坐标是一个元组 (row_start, col_start)。
+            full_size: 完整图像的大小 (例如，(height, width))。
+            patch_size: 小块的大小。
+            sigma: 高斯核的标准差。
+
+        Returns:
+            聚合后的图像，形状为 (1, C, full_size[0], full_size[1])。
+        """
+        num_patches = patches.shape[0]
+        channels = patches.shape[1]
+        aggregated_image = th.zeros((1, channels, full_size[0], full_size[1]), device=patches.device)
+        weight_sum = th.zeros((full_size[0], full_size[1]), device=patches.device)
+
+        # 生成高斯权重核
+        gaussian_weights = th.from_numpy(gaussian_kernel(patch_size, sigma)).float().to(patches.device)
+
+        for i in range(num_patches):
+            row_start, col_start = patch_coords[i]
+
+            # 将加权后的小块累加到聚合图像
+            aggregated_image[:, :, row_start:row_start+patch_size, col_start:col_start+patch_size] += \
+                patches[i].unsqueeze(0) * gaussian_weights.unsqueeze(0).unsqueeze(0)
+
+            # 累加权重
+            weight_sum[row_start:row_start+patch_size, col_start:col_start+patch_size] += gaussian_weights
+
+        # 除以权重总和进行归一化，添加 epsilon 防止除零
+        epsilon = 1e-8
+        aggregated_image /= (weight_sum.unsqueeze(0).unsqueeze(0) + epsilon)
+
+        return aggregated_image
+
+        
+
+    def p_sample_loop_with_patch_aggregation(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        patch_size=64,
+        stride=32,
+        sigma=4.0
+    ):
+        """
+        使用块聚合生成样本的循环函数。
+
+        Args:
+            model: 模型模块。
+            shape: 样本的形状，(N, C, H, W)。
+            noise: 如果指定，则使用该噪声进行采样。应该与 `shape` 的形状相同。
+            clip_denoised: 如果为 True，则将 x_start 预测裁剪到 [-1, 1]。
+            denoised_fn: 如果不为 None，则在采样之前将此函数应用于 x_start 预测。
+            cond_fn: 如果不为 None，则这是一个梯度函数，其作用类似于模型。
+            model_kwargs: 如果不为 None，则将额外的关键字参数传递给模型。这可以用于条件控制。
+            device: 如果指定，则在指定设备上创建样本。如果未指定，则使用模型参数的设备。
+            progress: 如果为 True，则显示 tqdm 进度条。
+            patch_size: 小块的大小。
+            stride: 步长。
+            sigma: 高斯核的标准差。
+
+        Returns:
+            一个不可微分的样本批次。
+        """
+        
+
+        final = None
+        for sample in self.p_sample_loop_progressive_with_patch_aggregation(
+            model,
+            shape,
+            noise=noise,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            cond_fn=cond_fn,
+            model_kwargs=model_kwargs,
+            device=device,
+            progress=progress,
+            patch_size=patch_size,
+            stride=stride,
+            sigma=sigma
+        ):
+            final = sample
+        return final["sample"]
+
+    def p_sample_loop_progressive_with_patch_aggregation(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        patch_size=64,
+        stride=32,
+        sigma=4.0
+    ):
+        """
+        使用块聚合生成样本并生成每个时间步的中间样本。
+
+        参数与 p_sample_loop_with_patch_aggregation() 相同。
+
+        返回一个字典生成器，其中每个字典是 p_sample_with_patch_aggregation() 的返回值。
+        """
+        if device is None:
+            device = next(model.parameters()).device
+        assert isinstance(shape, (tuple, list))
+        
+        full_size = (shape[2], shape[3])
+        
+        if noise is not None:
+            img = noise
+        else:
+            img = th.randn(*shape, device=device)
+
+        # 将隐变量分块
+        latents = model_kwargs['y']
+        latent_patches, latent_patch_coords = self.get_patches(latents, patch_size, stride)
+        model_kwargs['y'] = latent_patches
+        
+        # 将噪声分块
+        img_patches, img_patch_coords = self.get_patches(img, patch_size, stride)
+        
+        indices = list(range(self.num_timesteps))[::-1]
+
+        if progress:
+            # Lazy import so that we don't depend on tqdm.
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices)
+
+        for i in indices:
+            t = th.tensor([i] * shape[0], device=device).repeat(img_patches.shape[0]) # 重复batch次，因为batch=1, 所以patch有多少个，时间步重复多少次
+            with th.no_grad():
+                out = self.p_sample_with_patch_aggregation(
+                    model,
+                    img_patches,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    cond_fn=cond_fn,
+                    model_kwargs=model_kwargs,
+                    patch_size=patch_size
+                )
+                
+                # 将去噪后的小块聚合
+                aggregated_sample = self.aggregate_patches(out["sample"], img_patch_coords, full_size, patch_size, sigma)
+                aggregated_pred_xstart = self.aggregate_patches(out["pred_xstart"], img_patch_coords, full_size, patch_size, sigma)
+                
+                yield {"sample": aggregated_sample, "pred_xstart": aggregated_pred_xstart}
+                
+                # 为下一个时间步准备小块
+                img_patches, img_patch_coords = self.get_patches(aggregated_sample, patch_size, stride)
+                
+
+    def p_sample_with_patch_aggregation(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        patch_size=64
+    ):
+        """
+        使用块聚合从给定时间步的模型中采样 x_{t-1}。
+
+        Args:
+            model: 要从中采样的模型。
+            x: 当前的张量 x_{t-1}，形状为 (num_patches, C, patch_size, patch_size)。
+            t: t 的值，对于第一个扩散步骤从 0 开始。
+            clip_denoised: 如果为 True，则将 x_start 预测裁剪到 [-1, 1]。
+            denoised_fn: 如果不为 None，则在采样之前将此函数应用于 x_start 预测。
+            cond_fn: 如果不为 None，则这是一个梯度函数，其作用类似于模型。
+            model_kwargs: 如果不为 None，则将额外的关键字参数传递给模型。这可以用于条件控制。
+            patch_size: 小块的大小。
+
+        Returns:
+            一个字典，包含以下键：
+                - 'sample': 来自模型的一个随机样本。
+                - 'pred_xstart': 对 x_0 的预测。
+        """
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+        )
+        noise = th.randn_like(x)
+        nonzero_mask = (
+            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        )  # no noise when t == 0
+        if cond_fn is not None:
+            out["mean"] = self.condition_mean(cond_fn, out, x, t, model_kwargs=model_kwargs)
+        sample = out["mean"] + nonzero_mask * th.exp(0.5 * out["log_variance"]) * noise
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+
+    def ddim_sample_loop_with_patch_aggregation(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        eta=0.0,
+        patch_size=64,
+        stride=32,
+        sigma=4.0
+    ):
+        """
+        使用块聚合和 DDIM 生成样本的循环函数。
+
+        Args:
+            model: 模型模块。
+            shape: 样本的形状，(N, C, H, W)。
+            noise: 如果指定，则使用该噪声进行采样。应该与 `shape` 的形状相同。
+            clip_denoised: 如果为 True，则将 x_start 预测裁剪到 [-1, 1]。
+            denoised_fn: 如果不为 None，则在采样之前将此函数应用于 x_start 预测。
+            cond_fn: 如果不为 None，则这是一个梯度函数，其作用类似于模型。
+            model_kwargs: 如果不为 None，则将额外的关键字参数传递给模型。这可以用于条件控制。
+            device: 如果指定，则在指定设备上创建样本。如果未指定，则使用模型参数的设备。
+            progress: 如果为 True，则显示 tqdm 进度条。
+            eta: DDIM 的 eta 参数。
+            patch_size: 小块的大小。
+            stride: 步长。
+            sigma: 高斯核的标准差。
+
+        Returns:
+            一个不可微分的样本批次。
+        """
+        
+        full_size = (shape[2], shape[3])
+
+        final = None
+        for sample in self.ddim_sample_loop_progressive_with_patch_aggregation(
+            model,
+            shape,
+            noise=noise,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            cond_fn=cond_fn,
+            model_kwargs=model_kwargs,
+            device=device,
+            progress=progress,
+            eta=eta,
+            patch_size=patch_size,
+            stride=stride,
+            sigma=sigma
+        ):
+            final = sample
+        return final["sample"]
+
+    def ddim_sample_loop_progressive_with_patch_aggregation(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        eta=0.0,
+        patch_size=64,
+        stride=32,
+        sigma=4.0
+    ):
+        """
+        使用块聚合和 DDIM 生成样本并生成每个时间步的中间样本。
+
+        参数与 ddim_sample_loop_with_patch_aggregation() 相同。
+
+        返回一个字典生成器，其中每个字典是 ddim_sample_with_patch_aggregation() 的返回值。
+        """
+        if device is None:
+            device = next(model.parameters()).device
+        assert isinstance(shape, (tuple, list))
+        
+        full_size = (shape[2], shape[3])
+        
+        if noise is not None:
+            img = noise
+        else:
+            img = th.randn(*shape, device=device)
+
+        # 将隐变量分块
+        latents = model_kwargs['y']
+        latent_patches, latent_patch_coords = self.get_patches(latents, patch_size, stride)
+        model_kwargs['y'] = latent_patches
+        
+        # 将噪声分块
+        img_patches, img_patch_coords = self.get_patches(img, patch_size, stride)
+        
+        indices = list(range(self.num_timesteps))[::-1]
+
+        if progress:
+            # Lazy import so that we don't depend on tqdm.
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices)
+
+        for i in indices:
+            t = th.tensor([i] * shape[0], device=device).repeat(img_patches.shape[0]) # 重复batch次，因为batch=1, 所以patch有多少个，时间步重复多少次
+            with th.no_grad():
+                out = self.ddim_sample_with_patch_aggregation(
+                    model,
+                    img_patches,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    cond_fn=cond_fn,
+                    model_kwargs=model_kwargs,
+                    eta=eta,
+                    patch_size=patch_size
+                )
+                
+                # 将去噪后的小块聚合
+                aggregated_sample = self.aggregate_patches(out["sample"], img_patch_coords, full_size, patch_size, sigma)
+                aggregated_pred_xstart = self.aggregate_patches(out["pred_xstart"], img_patch_coords, full_size, patch_size, sigma)
+                
+                yield {"sample": aggregated_sample, "pred_xstart": aggregated_pred_xstart}
+                
+                # 为下一个时间步准备小块
+                img_patches, img_patch_coords = self.get_patches(aggregated_sample, patch_size, stride)
+                
+
+    def ddim_sample_with_patch_aggregation(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        eta=0.0,
+        patch_size=64
+    ):
+        """
+        使用块聚合和 DDIM 从给定时间步的模型中采样 x_{t-1}。
+
+        Args:
+            model: 要从中采样的模型。
+            x: 当前的张量 x_{t-1}，形状为 (num_patches, C, patch_size, patch_size)。
+            t: t 的值，对于第一个扩散步骤从 0 开始。
+            clip_denoised: 如果为 True，则将 x_start 预测裁剪到 [-1, 1]。
+            denoised_fn: 如果不为 None，则在采样之前将此函数应用于 x_start 预测。
+            cond_fn: 如果不为 None，则这是一个梯度函数，其作用类似于模型。
+            model_kwargs: 如果不为 None，则将额外的关键字参数传递给模型。这可以用于条件控制。
+            eta: DDIM 的 eta 参数。
+            patch_size: 小块的大小。
+
+        Returns:
+            一个字典，包含以下键：
+                - 'sample': 来自模型的一个随机样本。
+                - 'pred_xstart': 对 x_0 的预测。
+        """
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+        )
+        if cond_fn is not None:
+            out = self.condition_score(cond_fn, out, x, t, model_kwargs=model_kwargs)
+
+        # Usually our model outputs epsilon, but we re-derive it
+        # in case we used x_start or x_prev prediction.
+        eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+
+        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
+        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
+        sigma = (
+            eta
+            * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
+            * th.sqrt(1 - alpha_bar / alpha_bar_prev)
+        )
+        # Equation 12.
+        noise = th.randn_like(x)
+        mean_pred = (
+            out["pred_xstart"] * th.sqrt(alpha_bar_prev)
+            + th.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
+        )
+        nonzero_mask = (
+            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        )  # no noise when t == 0
+        sample = mean_pred + nonzero_mask * sigma * noise
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
 
 
 def _extract_into_tensor(arr, timesteps, broadcast_shape):
@@ -899,3 +1342,17 @@ def _extract_into_tensor(arr, timesteps, broadcast_shape):
     while len(res.shape) < len(broadcast_shape):
         res = res[..., None]
     return res + th.zeros(broadcast_shape, device=timesteps.device)
+
+def gaussian_kernel(size, sigma=4.0):
+  """生成高斯核。
+
+  Args:
+    size: 核的大小 (例如，对于 64x64 的核，size=64)。
+    sigma: 高斯核的标准差。
+
+  Returns:
+    一个大小为 (size, size) 的高斯核。
+  """
+  x, y = np.mgrid[-size//2 + 1:size//2 + 1, -size//2 + 1:size//2 + 1]
+  g = np.exp(-((x**2 + y**2)/(2.0*sigma**2)))
+  return g / g.sum()

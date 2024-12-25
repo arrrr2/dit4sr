@@ -13,8 +13,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from basicsr.data.realesrgan_dataset import RealESRGANDataset
-from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+from basicsr.data.lighting_pair import LightingPairataset
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR, ConstantLR
 import numpy as np
 from collections import OrderedDict
 from PIL import Image
@@ -31,12 +31,35 @@ from diffusers.models import AutoencoderKL
 from omegaconf import OmegaConf
 from torch.amp import autocast, GradScaler
 from sd3_impls import SD3LatentFormat
-torch.set_num_threads(4)
+import wandb
+import warnings
 
+# 忽略 PIL 抛出的警告
+warnings.filterwarnings("ignore", category=UserWarning)
 scaler = GradScaler("cuda", enabled=True)
+
+torch.set_num_threads(8)
 #################################################################################
 #                             Training Helper Functions                         #
 #################################################################################
+
+def log_missing_and_unexpected_keys(loaded_state_dict, model_state_dict):
+    missing_keys = []
+    unexpected_keys = []
+
+    # Check for missing keys
+    for name in loaded_state_dict:
+        if name not in model_state_dict:
+            missing_keys.append(name)
+        elif loaded_state_dict[name].shape != model_state_dict[name].shape:
+            missing_keys.append(name)
+
+    # Check for unexpected keys
+    for name in model_state_dict:
+        if name not in loaded_state_dict:
+            unexpected_keys.append(name)
+
+    return missing_keys, unexpected_keys
 
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.999):
@@ -51,12 +74,22 @@ def update_ema(ema_model, model, decay=0.999):
         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
 
-def requires_grad(model, flag=True):
+def requires_grad(model_or_param, flag=True):
     """
-    Set requires_grad flag for all parameters in a model.
+    Set requires_grad flag for all parameters in a model or a single parameter.
     """
-    for p in model.parameters():
-        p.requires_grad = flag
+    # Check if it's a model with parameters
+    if isinstance(model_or_param, (torch.nn.Module, torch.nn.parallel.DistributedDataParallel)):
+        if isinstance(model_or_param, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+            model_or_param = model_or_param.module  # Access the underlying model
+        for p in model_or_param.parameters():
+            p.requires_grad = flag
+    # Otherwise, assume it's a single parameter
+    elif isinstance(model_or_param, torch.nn.Parameter):
+        model_or_param.requires_grad = flag
+    else:
+        raise TypeError("Expected a torch.nn.Module or torch.nn.Parameter, got "
+                        f"{type(model_or_param).__name__}.")
 
 
 def cleanup():
@@ -71,6 +104,7 @@ def create_logger(logging_dir):
     Create a logger that writes to a log file and stdout.
     """
     if dist.get_rank() == 0:  # real logger
+
         logging.basicConfig(
             level=logging.INFO,
             format='[\033[34m%(asctime)s\033[0m] %(message)s',
@@ -153,22 +187,67 @@ def main(args):
     model = DiT_models[args.model](
         input_size=latent_size,
     )
+
+    if args.checkpoint is not None:
+        checkpoint = torch.load(args.checkpoint, map_location="cpu")
+
+        # Load model weights
+        loaded_state_dict = checkpoint["model"]
+        model_state_dict = model.state_dict()
+
+        # Filter mismatched keys
+        filtered_state_dict = {k: v for k, v in loaded_state_dict.items() if k in model_state_dict and v.shape == model_state_dict[k].shape}
+
+        loaded_params = model.load_state_dict(filtered_state_dict, strict=False)
+
+        # Check for missing and unexpected keys for model
+        missing_keys, unexpected_keys = log_missing_and_unexpected_keys(loaded_state_dict, model_state_dict)
+
+        # Log the details
+        logger.info(f"Loaded model from {args.checkpoint}")
+        if missing_keys:
+            logger.info(f"Model missing keys: {missing_keys}")
+        if unexpected_keys:
+            logger.info(f"Model unexpected keys: {unexpected_keys}")
+
+        # Handle EMA (Exponential Moving Average) loading
+        ema = deepcopy(model).to(device)
+        ema_state_dict = checkpoint["ema"]
+
+        # Filter mismatched keys for EMA
+        filtered_ema_state_dict = {k: v for k, v in ema_state_dict.items() if k in ema.state_dict() and v.shape == ema.state_dict()[k].shape}
+
+        ema_loaded_params = ema.load_state_dict(filtered_ema_state_dict, strict=False)
+
+        # Check for missing and unexpected keys for EMA
+        ema_missing_keys, ema_unexpected_keys = log_missing_and_unexpected_keys(ema_state_dict, ema.state_dict())
+
+        if ema_missing_keys:
+            logger.info(f"EMA missing keys: {ema_missing_keys}")
+        if ema_unexpected_keys:
+            logger.info(f"EMA unexpected keys: {ema_unexpected_keys}")
+
+
+
+
+
     # Note that parameter initialization is done within the DiT constructor
-    ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
+    if args.checkpoint is None: ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
     model = DDP(model.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="", diffusion_steps=1000)  # default: 1000 steps, linear noise schedule
-    vae = AutoencoderKL.from_pretrained(f"./vae").to(device)
+    vae = AutoencoderKL.from_pretrained(f"./vae", torch_dtype=torch.float16).to(device)
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
-    warmup_scheduler = LinearLR(opt, start_factor=0.1, end_factor=1.0, total_iters=20000)
-    annealing_scheduler = CosineAnnealingLR(opt, T_max=400000, eta_min=0.00001)
-    sch = SequentialLR(opt, schedulers=[warmup_scheduler, annealing_scheduler], milestones=[20000])
+    opt = torch.optim.AdamW(model.parameters(), lr=2e-5, weight_decay=0)  
+    constant = ConstantLR(opt, 2e-5)
+
+
+    sch = SequentialLR(opt, schedulers=[constant,], milestones=[]) # 前10000 iters 恒定为 1e-5 (乘以1)
 
     dataset_conf = OmegaConf.load(args.dataset)
-    dataset = RealESRGANDataset(dataset_conf)
+    dataset = LightingPairataset(dataset_conf)
     
     if args.compile:
         model = torch.compile(model,  mode="max-autotune")
@@ -188,7 +267,8 @@ def main(args):
         sampler=sampler,
         num_workers=args.num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        persistent_workers=True,
     )
 
 
@@ -206,35 +286,67 @@ def main(args):
     running_loss = 0
     start_time = time()
 
+    if rank == 0:
+        wandb_run = wandb.init(project="Diffusion-Lighting", config= 
+                   {
+                        "model": args.model,
+                        "image_size": args.image_size,
+                        "iters": args.iters,
+                        "global_batch_size": args.global_batch_size,
+                        "global_seed": args.global_seed,
+                        "num_workers": args.num_workers,
+                        "log_every": args.log_every,
+                        "ckpt_every": args.ckpt_every,
+                        "bernoulli_mid": args.bernoulli_mid,
+                        "bernoulli_p": args.bernoulli_p,
+                        "lr": 2e-4,
+                        "weight_decay": 0,
+                        "timestep_respacing": "",
+                        "diffusion_steps": 1000,
+                        "warmup_iters": 20000,
+                        "annealing_iters": 400000,
+                        "compile": args.compile,
+                        "no_sample": args.no_sample,
+                        "dataset": args.dataset,
 
-
+                   })
+        
+    # requires_grad(model, False)  
+    # requires_grad(model.module.pos_embed, True)  
+    # logger.info("Freezing model parameters, only training pos_embed.")
 
     logger.info(f"Training for {args.iters} iterss...")
     for epoch in range(100000000000):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
-        for x, y in loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-            opt.zero_grad()
-            with torch.autocast("cuda", enabled=True):
-                y = ff.interpolate(y, x.size(2), mode="nearest")
-                with torch.no_grad():
-                    # Map input images to latent space 
-                    if args.no_sample: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
-                    else: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
-                    x, y = pin(x), pin(y)
 
+
+
+        for x, y in loader:
+            x = x.to(device, non_blocking=True, dtype=torch.float16)
+            y = y.to(device, non_blocking=True, dtype=torch.float16)
+            opt.zero_grad()
+
+            with torch.no_grad():
+                # Map input images to latent space 
+                if args.no_sample: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
+                else: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
+                x, y = pin(x), pin(y)
+
+            x, y = x.to(torch.float32), y.to(torch.float32)
+
+            with torch.autocast("cuda", enabled=True):
                 # t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 t = non_uniform_sampler(x.shape[0], diffusion.num_timesteps, args.bernoulli_mid, args.bernoulli_p, device)
                 model_kwargs = dict(y=y)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
                 loss = loss_dict["loss"].mean()
+
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
             sch.step()
-            update_ema(ema, model.module)
+            if train_steps > 100_000: update_ema(ema, model.module)
 
             # Log loss values:
             running_loss += loss.item()
@@ -249,10 +361,20 @@ def main(args):
                 avg_loss = torch.tensor(running_loss / log_steps, device=device)
                 dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / dist.get_world_size()
-                logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
+                logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.6f}, Train Steps/Sec: {steps_per_sec:.2f}", )
                 running_loss = 0
                 log_steps = 0
                 start_time = time()
+                if rank == 0:
+                    # print("logged")
+                    wandb_run.log({"Loss": avg_loss, "Speed": steps_per_sec, "learning rate": opt.param_groups[0]["lr"],}, step=train_steps)
+
+                # #------------------------------------------------------------
+                # if train_steps == 10000:
+                #     # 10 个 epoch 后训练所有层
+                #     requires_grad(model, True)  # 打开所有层的梯度更新
+                #     logger.info("Unfreezing all model parameters.")
+                # #------------------------------------------------------------
 
             # Save DiT checkpoint:
             if train_steps % args.ckpt_every == 0 and train_steps > 0:
@@ -271,7 +393,7 @@ def main(args):
         if train_steps >= args.iters:
             break
 
-    model.eval()  # important! This disables randomized embedding dropout
+    # model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
 
     logger.info("Done!")
@@ -285,15 +407,17 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="baseline.yaml")
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-S/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
-    parser.add_argument("--iters", type=int, default=600_000)
+    parser.add_argument("--iters", type=int, default=60_100)
     parser.add_argument("--compile", action="store_true", help="Enable compilation")
     parser.add_argument("--no_sample", action="store_true", help="not using sample mode")
-    parser.add_argument("--global-batch-size", type=int, default=256)
+    parser.add_argument("--global-batch-size", type=int, default=128)
     parser.add_argument("--global-seed", type=int, default=12222)
     parser.add_argument("--num-workers", type=int, default=6)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=100_000)
     parser.add_argument("--bernoulli-mid", type=int, default=500)
     parser.add_argument("--bernoulli-p", type=float, default=0.5)
+    parser.add_argument("--checkpoint", type=str, default=None)
+    
     args = parser.parse_args()
     main(args)

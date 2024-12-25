@@ -102,6 +102,8 @@ class RealESRGANDataset(data.Dataset):
 
         self.mode = mode
         self.rescale_gt = conf['rescale_gt']
+
+        self.jpeger = DiffJPEG(False).to("cuda")
     
     @torch.no_grad()
     def __getitem__(self, index):
@@ -119,12 +121,13 @@ class RealESRGANDataset(data.Dataset):
         while retry > 0:
             try:
                 img_bytes = self.file_client.get(gt_path, 'gt')
-                img_gt = imfrombytes(img_bytes, float32=True)
+                img_gt = imfrombytes(img_bytes, float32=False)
             # except (IOError, OSError, AttributeError) as e:
             except:
                 # logger = get_root_logger()
                 # logger.warn(f'File client error: {e}, remaining retry times: {retry - 1}')
                 # change another file to read
+                print(f'File client error, remaining retry times: {retry - 1}')
                 index = random.randint(0, self.__len__())
                 gt_path = self.paths[index]
                 time.sleep(0.1)  # sleep 1s for occasional server congestion
@@ -160,6 +163,9 @@ class RealESRGANDataset(data.Dataset):
                 top = random.randint(0, h - crop_pad_size)
                 left = random.randint(0, w - crop_pad_size)
                 img_gt = img_gt[top:top + crop_pad_size, left:left + crop_pad_size, ...]
+
+            # get separate memory for img_gt
+            img_gt = img_gt.copy()
 
             # 2nd: flip and rotation
             img_gt = augment(img_gt, self.opt['use_hflip'], self.opt['use_rot'])
@@ -242,24 +248,25 @@ class RealESRGANDataset(data.Dataset):
         kernel = torch.FloatTensor(kernel)
         kernel2 = torch.FloatTensor(kernel2)
 
-        # return_d = {'gt': img_gt, 'kernel1': kernel, 'kernel2': kernel2, 'sinc_kernel': sinc_kernel, 'gt_path': gt_path}
-        # return return_d
+        return_d = {'gt': img_gt, 'kernel1': kernel, 'kernel2': kernel2, 'sinc_kernel': sinc_kernel, 'gt_path': gt_path}
+        return return_d
 
-        imgs = self.degrade_fun(img_gt, kernel, kernel2, sinc_kernel, conf_degradation=self.deg)
-        gt, lq = imgs['gt'], imgs['lq']
-        return gt, lq
+        # imgs = self.degrade_fun(img_gt, kernel, kernel2, sinc_kernel, conf_degradation=self.deg)
+        # gt, lq = imgs['gt'], imgs['lq']
+        # return gt, lq
 
     def __len__(self):
         return len(self.paths)
 
+    @torch.no_grad()
     def degrade_fun(self,  im_gt, kernel1, kernel2, sinc_kernel, conf_degradation=None,):
         if not hasattr(self, 'jpeger'):
             self.jpeger = DiffJPEG(differentiable=False)  # simulate JPEG compression artifacts
-        if not conf_degradation: conf_degradation = self.opt
+        if not conf_degradation: conf_degradation = self.deg
         
         ori_shape = im_gt.shape
 
-        im_gt = im_gt.squeeze(0).unsqueeze(0)
+        # im_gt = im_gt.squeeze(0).unsqueeze(0)
         ori_h, ori_w = im_gt.size()[-2:]
         sf = conf_degradation['sf']
 
@@ -299,7 +306,7 @@ class RealESRGANDataset(data.Dataset):
         # JPEG compression
         jpeg_p = out.new_zeros(out.size(0)).uniform_(*conf_degradation['jpeg_range'])
         out = torch.clamp(out, 0, 1)  # clamp to [0, 1], otherwise JPEGer will result in unpleasant artifacts
-        out = self.jpeger(out, quality=jpeg_p)
+        with torch.no_grad(): out = self.jpeger(out, quality=jpeg_p)
 
         # ----------------------- The second degradation process ----------------------- #
         # blur

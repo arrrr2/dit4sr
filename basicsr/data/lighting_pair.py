@@ -115,8 +115,11 @@ class LightingPairataset(data.Dataset):
                 img_gt = imfrombytes(img_bytes, float32=True)
                 if self.conditional: 
                     img_lq = imfrombytes(self.file_client.get(self.lq_paths[index], 'lq'), float32=True)
-                    print(f"lq: {self.lq_paths[index]}")
-                    print(f"gt: {gt_path}")
+                    if random.random() < 0.001:
+                        print(f"lq: {self.lq_paths[index]}")
+                        print(f"gt: {gt_path}")
+                        cv2.imwrite('src.jpg', cv2.cvtColor((img_lq * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+                        cv2.imwrite('gt.jpg', cv2.cvtColor((img_gt * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
                 else: img_lq = np.random.rand(*img_gt.shape).astype(np.float32)
                 if img_gt.shape[0] < gt_size or img_gt.shape[1] < gt_size:
                     raise ValueError(f'GT image is too small: {gt_path}, {img_gt.shape}')
