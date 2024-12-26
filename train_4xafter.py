@@ -231,11 +231,11 @@ def main(args):
             with torch.no_grad():
                 # Map input images to latent space 
                 x, y = t16(x), t16(y)
-                y = ff.interpolate(y, x.size(2), mode="nearest")
                 if args.no_sample: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
                 else: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
                 x, y = pin(x), pin(y)
                 x, y = t32(x), t32(y)
+                y = ff.interpolate(y, x.size(2), mode="nearest")
             with torch.autocast("cuda", enabled=True):
                 
                 # t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
