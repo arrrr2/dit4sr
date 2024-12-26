@@ -161,7 +161,7 @@ def main(args):
     requires_grad(ema, False)
     model = DDP(model.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="", diffusion_steps=1000)  # default: 1000 steps, linear noise schedule
-    vae = AutoencoderKL.from_pretrained(f"./vae", torch_dtype=torch.float16).to(device)
+    vae = AutoencoderKL.from_pretrained(f"./vae", torch_dtype=torch.float16, low_cpu_mem_usage=True).to(device)
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
@@ -222,7 +222,7 @@ def main(args):
 
             # print(f"Time to load batch: {tik - tok}")
 
-            imgs = dataset.degrade_fun(batch['gt'].to(device, non_blocking=True), batch['kernel1'].to(device, non_blocking=True),\
+            with torch.autocast("cuda"): imgs = dataset.degrade_fun(batch['gt'].to(device, non_blocking=True), batch['kernel1'].to(device, non_blocking=True),\
                                         batch['kernel2'].to(device, non_blocking=True), batch['sinc_kernel'].to(device, non_blocking=True))
             x, y = imgs['gt'], imgs['lq']
             # x = x.to(device, non_blocking=True)
