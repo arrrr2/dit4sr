@@ -76,9 +76,11 @@ def create_logger(logging_dir):
             level=logging.INFO,
             format='[\033[34m%(asctime)s\033[0m] %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S',
-            handlers=[logging.StreamHandler(), logging.FileHandler(f"{logging_dir}/log.txt")]
+            handlers=[logging.StreamHandler(), logging.FileHandler(f"{logging_dir}/log.txt")],
+            force=True
         )
         logger = logging.getLogger(__name__)
+        print(f"logger set, name={str(logger)}")
     else:  # dummy logger (does nothing)
         logger = logging.getLogger(__name__)
         logger.addHandler(logging.NullHandler())
