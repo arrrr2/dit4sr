@@ -345,6 +345,9 @@ def DiT_S_4(**kwargs):
 def DiT_S_8(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
 
+def DiT_XS_2_D(**kwargs):
+    return DiT(depth=32, hidden_size=128, patch_size=2, num_heads=2, **kwargs)
+
 def DiT_XS_2(**kwargs):
     return DiT(depth=8, hidden_size=256, patch_size=2, num_heads=4, **kwargs)
 
@@ -359,11 +362,12 @@ DiT_models = {
     'DiT-L/2':  DiT_L_2,   'DiT-L/4':  DiT_L_4,   'DiT-L/8':  DiT_L_8,
     'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
     'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8,
+    'DIT-XS/2-D': DiT_XS_2_D,
     'DiT-XS/2': DiT_XS_2,  'DiT-XXS/2': DiT_XXS_2,  'DiT-XXS/1': DiT_XXS_1, 'DiT-M/2': DiT_M_2,
 }
 
 if __name__=="__main__":
-    model = DiT_B_2()
+    model = DiT_XS_2_D()
     from torch.utils.flop_counter import FlopCounterMode
 
     input = torch.randn(1, 16, 32, 32)
@@ -371,7 +375,16 @@ if __name__=="__main__":
     t = torch.randn(1)
 
     
-    with FlopCounterMode(depth=5):
+    with FlopCounterMode(depth=2):
         model(input, t, y=y)
-
     
+    # 计算参数量
+    def count_parameters(model):
+        total_params = 0
+        for param in model.parameters():
+            if param.requires_grad:  # 只计算可训练的参数
+                total_params += param.numel()  # 累加每个参数的参数量
+        return total_params
+
+    total_params = count_parameters(model)
+    print(f"Total trainable parameters: {total_params}")

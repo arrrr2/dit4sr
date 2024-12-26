@@ -1,7 +1,13 @@
-
 {
     "version": "0.2.0",
     "configurations": [
+        {
+            "name": "Python 调试程序: 当前文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
         {
             "name": "Debug sample_lighting.py",
             "type": "debugpy",
@@ -9,11 +15,16 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "--model", "DiT-M/2",
-                "--ckpt", "./results/007-DiT-M-2/checkpoints/0400000.pt",
-                "--in-path", "/home/ubuntu/data/datasets/lcdp_input",
-                "--out-path", "/home/ubuntu/data/datasets/lcdp_output/out-st1-400k",
-                "--image-size", "256"
+                "--model",
+                "DiT-M/2",
+                "--ckpt",
+                "./results/007-DiT-M-2/checkpoints/0400000.pt",
+                "--in-path",
+                "/home/ubuntu/data/datasets/lcdp_input",
+                "--out-path",
+                "/home/ubuntu/data/datasets/lcdp_output/out-st1-400k",
+                "--image-size",
+                "256"
             ],
             "justMyCode": true
         }
