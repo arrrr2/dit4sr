@@ -151,7 +151,7 @@ def main(args):
         model_kwargs = dict(y=latents)
         # Sample images:
         with torch.no_grad():
-            samples = diffusion.p_sample_loop(
+            samples = diffusion.ddim_sample_loop(
                 model.forward, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device
             )
             samples = pout(samples)

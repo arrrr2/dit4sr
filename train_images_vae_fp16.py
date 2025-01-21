@@ -31,7 +31,7 @@ from diffusers.models import AutoencoderKL
 from omegaconf import OmegaConf
 from torch.amp import autocast, GradScaler
 from sd3_impls import SD3LatentFormat
-
+import random
 scaler = GradScaler("cuda", enabled=True)
 #################################################################################
 #                             Training Helper Functions                         #
@@ -229,6 +229,12 @@ def main(args):
                 # Map input images to latent space 
                 x, y = t16(x), t16(y)
                 y = ff.interpolate(y, x.size(2), mode="nearest")
+                if random.random() < 0.001:
+                    saving = x[0]
+                    saving = (saving * 0.5 + 0.5).clamp(0, 1)
+                    saving = (saving * 255).to(torch.uint8).cpu().numpy().transpose(1, 2, 0)
+                    saving = Image.fromarray(saving)
+                    saving.save(f"test.png")
                 if args.no_sample: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
                 else: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
                 x, y = pin(x), pin(y)
