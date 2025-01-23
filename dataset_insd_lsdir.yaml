@@ -26,7 +26,7 @@ data:
     type: realesrgan
     params:
       sf: 4
-      dir_paths: ['/home/ubuntu/data/datasets/lsdir/train/hr', '/home/ubuntu/data/datasets/imgnet_gen_selected']
+      dir_paths: ['/home/ubuntu/ssd/lsdir_splitted', '/home/ubuntu/ssd/imgnet_gen_selected_splitted']
       txt_file_path: [] 
       im_exts: ['JPEG', 'png']
       io_backend:
