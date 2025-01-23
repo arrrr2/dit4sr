@@ -206,6 +206,8 @@ def main(args):
     running_loss = 0
     start_time = time()
 
+    dataset.jpeger = dataset.jpeger.to(device)
+
 
 
 
@@ -215,7 +217,7 @@ def main(args):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
         for batch in loader:
-            tik = time()
+            
 
             # print(f"Time to load batch: {tik - tok}")
 
@@ -229,7 +231,7 @@ def main(args):
                 # Map input images to latent space 
                 x, y = t16(x), t16(y)
                 y = ff.interpolate(y, x.size(2), mode="nearest")
-                if random.random() < 0.001:
+                if random.random() < 0.0001:
                     saving = x[0]
                     saving = (saving * 0.5 + 0.5).clamp(0, 1)
                     saving = (saving * 255).to(torch.uint8).cpu().numpy().transpose(1, 2, 0)

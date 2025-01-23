@@ -160,8 +160,10 @@ class RealESRGANDataset(data.Dataset):
             if img_gt.shape[0] > crop_pad_size or img_gt.shape[1] > crop_pad_size:
                 h, w = img_gt.shape[0:2]
                 # randomly choose top and left coordinates
-                top = random.randint(0, h - crop_pad_size)
-                left = random.randint(0, w - crop_pad_size)
+                if h > crop_pad_size: top = random.randint(0, h - crop_pad_size)
+                else: top = 0
+                if w > crop_pad_size: left = random.randint(0, w - crop_pad_size)
+                else: left = 0
                 img_gt = img_gt[top:top + crop_pad_size, left:left + crop_pad_size, ...]
 
             # get separate memory for img_gt

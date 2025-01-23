@@ -1347,7 +1347,7 @@ def gaussian_kernel(size, sigma=4.0):
   """生成高斯核。
 
   Args:
-    size: 核的大小 (例如，对于 64x64 的核，size=64)。
+    size: 核的大小 (例如，对于 64x64 的核，size=64)。W
     sigma: 高斯核的标准差。
 
   Returns:
