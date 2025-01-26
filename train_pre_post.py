@@ -31,10 +31,12 @@ from diffusers.models import AutoencoderKL
 from omegaconf import OmegaConf
 from torch.amp import autocast, GradScaler
 from sd3_impls import SD3LatentFormat
-torch.set_num_threads(1)
+import random
+# torch.set_num_threads(1)
 # torch.set_num_interop_threads(1)
 
-scaler = GradScaler("cuda", enabled=True)
+scaler_pre = GradScaler("cuda", enabled=True)
+scaler_post = GradScaler("cuda", enabled=True)
 #################################################################################
 #                             Training Helper Functions                         #
 #################################################################################
@@ -154,28 +156,38 @@ def main(args):
     # Create model:
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.image_size // 8
-    model = DiT_models[args.model](
-        input_size=latent_size,
-    )
+    model_pre = DiT_models[args.model](input_size=latent_size,)
+    model_post = DiT_models[args.model](input_size=latent_size,)
     # Note that parameter initialization is done within the DiT constructor
-    ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
-    requires_grad(ema, False)
-    model = DDP(model.to(device), device_ids=[rank])
-    diffusion = create_diffusion(timestep_respacing="", diffusion_steps=1000)  # default: 1000 steps, linear noise schedule
+    ema_pre = deepcopy(model_pre).to(device)  # Create an EMA of the model for use after training
+    ema_post = deepcopy(model_post).to(device)
+    requires_grad(ema_pre, False)
+    requires_grad(ema_post, False)
+    
+    model_pre = DDP(model_pre.to(device), device_ids=[rank])
+    model_post = DDP(model_post.to(device), device_ids=[rank])
+    diffusion_pre = create_diffusion(timestep_respacing="", diffusion_steps=1000)  # default: 1000 steps, linear noise schedule
+    diffusion_post = create_diffusion(timestep_respacing="", diffusion_steps=1000)  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"./vae", torch_dtype=torch.float16, low_cpu_mem_usage=True).to(device)
-    logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"DiT Parameters: {sum(p.numel() for p in model_post.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
-    warmup_scheduler = LinearLR(opt, start_factor=0.1, end_factor=1.0, total_iters=20000)
-    annealing_scheduler = CosineAnnealingLR(opt, T_max=400000, eta_min=0.00001)
-    sch = SequentialLR(opt, schedulers=[warmup_scheduler, annealing_scheduler], milestones=[20000])
+    opt_pre = torch.optim.AdamW(model_pre.parameters(), lr=1e-4, weight_decay=0)
+    warmup_scheduler_pre = LinearLR(opt_pre, start_factor=0.1, end_factor=1.0, total_iters=20000)
+    annealing_scheduler_pre = CosineAnnealingLR(opt_pre, T_max=400000, eta_min=0.00001)
+    sch_pre = SequentialLR(opt_pre, schedulers=[warmup_scheduler_pre, annealing_scheduler_pre], milestones=[20000])
+
+    opt_post = torch.optim.AdamW(model_post.parameters(), lr=1e-4, weight_decay=0)
+    warmup_scheduler_post = LinearLR(opt_post, start_factor=0.1, end_factor=1.0, total_iters=20000)
+    annealing_scheduler_post = CosineAnnealingLR(opt_post, T_max=400000, eta_min=0.00001)
+    sch_post = SequentialLR(opt_post, schedulers=[warmup_scheduler_post, annealing_scheduler_post], milestones=[20000])
 
     dataset_conf = OmegaConf.load(args.dataset)
     dataset = RealESRGANDataset(dataset_conf)
     
     if args.compile:
-        model = torch.compile(model,  mode="max-autotune")
+        model_pre = torch.compile(model_pre,  mode="max-autotune")
+        model_post = torch.compile(model_post, mode="max-autotune")
         vae.encode = torch.compile(vae.encode, fullgraph=True, mode="max-autotune")
 
     sampler = DistributedSampler(
@@ -197,9 +209,14 @@ def main(args):
 
 
     # Prepare models for training:
-    update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
-    model.train()  # important! This enables embedding dropout for classifier-free guidance
-    ema.eval()  # EMA model should always be in eval mode
+    update_ema(ema_pre, model_pre.module, decay=0)  # Ensure EMA is initialized with synced weights
+    model_pre.train()  # important! This enables embedding dropout for classifier-free guidance
+    ema_pre.eval()  # EMA model should always be in eval mode
+
+    update_ema(ema_post, model_post.module, decay=0)  # Ensure EMA is initialized with synced weights
+    model_post.train()  # important! This enables embedding dropout for classifier-free guidance
+    ema_post.eval()  # EMA model should always be in eval mode
+
     pin = SD3LatentFormat().process_in
     pout = SD3LatentFormat().process_out
 
@@ -207,9 +224,11 @@ def main(args):
     # Variables for monitoring/logging purposes:
     train_steps = 0
     log_steps = 0
-    running_loss = 0
+    running_loss_pre = 0
+    running_loss_post = 0
     start_time = time()
 
+    dataset.jpeger = dataset.jpeger.to(device)
 
 
 
@@ -225,33 +244,58 @@ def main(args):
 
             with torch.autocast("cuda"): imgs = dataset.degrade_fun(batch['gt'].to(device, non_blocking=True), batch['kernel1'].to(device, non_blocking=True),\
                                         batch['kernel2'].to(device, non_blocking=True), batch['sinc_kernel'].to(device, non_blocking=True))
-            x, y = imgs['gt'], imgs['lq']
+            x, y_post = imgs['gt'], imgs['lq']
             # x = x.to(device, non_blocking=True)
             # y = y.to(device, non_blocking=True)
-            opt.zero_grad()
+            opt_pre.zero_grad(), opt_post.zero_grad()
+            
             with torch.no_grad():
                 # Map input images to latent space 
-                x, y = t16(x), t16(y)
-                y = ff.interpolate(y, x.size(2), mode="nearest")
-                if args.no_sample: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
-                else: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
-                x, y = pin(x), pin(y)
-                x, y = t32(x), t32(y)
+                x, y_post = t16(x), t16(y_post)
+                y_pre = ff.interpolate(y_post, x.size(2), mode="nearest")
+                if random.random() < 0.001:
+                    saving =y_post[0]
+                    saving = (saving * 0.5 + 0.5).clamp(0, 1)
+                    saving = (saving * 255).to(torch.uint8).cpu().numpy().transpose(1, 2, 0)
+                    saving = Image.fromarray(saving)
+                    saving.save(f"test.png")
+                if args.no_sample: x, y_post, y_pre = vae.encode(x).latent_dist.mode().clone(), vae.encode(y_pre).latent_dist.mode().clone(), 
+                else: x, y_post, y_pre = vae.encode(x).latent_dist.sample().clone(), vae.encode(y_post).latent_dist.sample().clone(), vae.encode(y_pre).latent_dist.mode().clone()
+                y_post = ff.interpolate(y_post, x.size(2), mode="nearest")
+                x, y_post, y_pre = pin(x), pin(y_post), pin(y_pre)
+                x, y_post, y_pre = t32(x), t32(y_post), t32(y_pre)
             with torch.autocast("cuda", enabled=True):
                 
                 # t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-                t = non_uniform_sampler(x.shape[0], diffusion.num_timesteps, args.bernoulli_mid, args.bernoulli_p, device)
-                model_kwargs = dict(y=y)
-                loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-                loss = loss_dict["loss"].mean()
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            scaler.update()
-            sch.step()
-            update_ema(ema, model.module)
+                t = non_uniform_sampler(x.shape[0], diffusion_pre.num_timesteps, args.bernoulli_mid, args.bernoulli_p, device)
+                
+                model_kwargs_pre = dict(y=y_pre)
+                model_kwargs_post = dict(y=y_post)
+
+
+                loss_dict_pre = diffusion_pre.training_losses(model_pre, x, t, model_kwargs_pre)
+                loss_dict_post = diffusion_post.training_losses(model_post, x, t, model_kwargs_post)
+
+                loss_pre = loss_dict_pre["loss"].mean()
+                loss_post = loss_dict_post["loss"].mean()
+
+            # Backpropagate and update for model_pre
+            scaler_pre.scale(loss_pre).backward()
+            scaler_pre.step(opt_pre)
+            scaler_pre.update()
+            sch_pre.step()
+            update_ema(ema_pre, model_pre.module)
+
+            # Backpropagate and update for model_post
+            scaler_post.scale(loss_post).backward()
+            scaler_post.step(opt_post)
+            scaler_post.update()
+            sch_post.step()
+            update_ema(ema_post, model_post.module)
 
             # Log loss values:
-            running_loss += loss.item()
+            running_loss_pre += loss_pre.item()
+            running_loss_post += loss_post.item()
             log_steps += 1
             train_steps += 1
             if train_steps % args.log_every == 0:
@@ -260,35 +304,55 @@ def main(args):
                 end_time = time()
                 steps_per_sec = log_steps / (end_time - start_time)
                 # Reduce loss history over all processes:
-                avg_loss = torch.tensor(running_loss / log_steps, device=device)
-                dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
-                avg_loss = avg_loss.item() / dist.get_world_size()
-                logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
-                running_loss = 0
+                # Calculate average loss for pre and post separately
+                avg_loss_pre = torch.tensor(running_loss_pre / log_steps, device=device)
+                avg_loss_post = torch.tensor(running_loss_post / log_steps, device=device)
+                
+                # Reduce the losses across all processes
+                dist.all_reduce(avg_loss_pre, op=dist.ReduceOp.SUM)
+                dist.all_reduce(avg_loss_post, op=dist.ReduceOp.SUM)
+                
+                # Calculate the final average loss for pre and post
+                avg_loss_pre = avg_loss_pre.item() / dist.get_world_size()
+                avg_loss_post = avg_loss_post.item() / dist.get_world_size()
+                
+                # Log the losses
+                logger.info(f"(step={train_steps:07d}) Pre Train Loss: {avg_loss_pre:.4f}, Post Train Loss: {avg_loss_post:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
+                running_loss_pre = 0
+                running_loss_post = 0
                 log_steps = 0
                 start_time = time()
 
             # Save DiT checkpoint:
             if train_steps % args.ckpt_every == 0 and train_steps > 0:
                 if rank == 0:
-                    checkpoint = {
-                        "model": model.module.state_dict(),
-                        "ema": ema.state_dict(),
-                        "opt": opt.state_dict(),
+                    # Save pre model checkpoint
+                    checkpoint_pre = {
+                        "model": model_pre.module.state_dict(),
+                        "ema": ema_pre.state_dict(),
+                        "opt": opt_pre.state_dict(),
                         "args": args
                     }
-                    checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
-                    torch.save(checkpoint, checkpoint_path)
-                    logger.info(f"Saved checkpoint to {checkpoint_path}")
+                    checkpoint_path_pre = f"{checkpoint_dir}/{train_steps:07d}_pre.pt"
+                    torch.save(checkpoint_pre, checkpoint_path_pre)
+                    logger.info(f"Saved pre checkpoint to {checkpoint_path_pre}")
+
+                    # Save post model checkpoint
+                    checkpoint_post = {
+                        "model": model_post.module.state_dict(),
+                        "ema": ema_post.state_dict(),
+                        "opt": opt_post.state_dict(),
+                        "args": args
+                    }
+                    checkpoint_path_post = f"{checkpoint_dir}/{train_steps:07d}_post.pt"
+                    torch.save(checkpoint_post, checkpoint_path_post)
+                    logger.info(f"Saved post checkpoint to {checkpoint_path_post}")
                 dist.barrier()
 
-            tok = time()
             # print(f"Time to process batch: {tok - tik}")
         if train_steps >= args.iters:
             break
 
-    model.eval()  # important! This disables randomized embedding dropout
-    # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
 
     logger.info("Done!")
     cleanup()
