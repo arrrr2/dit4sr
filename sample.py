@@ -29,7 +29,7 @@ def main(args):
     # Setup PyTorch:
     torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    device = "cuda:3" if torch.cuda.is_available() else "cpu"
 
     if args.ckpt is None:
         assert args.model == "DiT-XXS/2", "Only DiT-XL/2 models are available for auto-download."
@@ -115,7 +115,7 @@ def main(args):
     ])
 
     dataset = CustomDataset(args.in_path, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=4)
 
     # Load model:
     latent_size = args.image_size // 8

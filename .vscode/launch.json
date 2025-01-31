@@ -15,16 +15,11 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "--model",
-                "DiT-M/2",
-                "--ckpt",
-                "./results/007-DiT-M-2/checkpoints/0400000.pt",
-                "--in-path",
-                "/home/ubuntu/data/datasets/lcdp_input",
-                "--out-path",
-                "/home/ubuntu/data/datasets/lcdp_output/out-st1-400k",
-                "--image-size",
-                "256"
+                "--model", "DiT-XS/2",
+                "--ckpt", "./results/000-DiT-XS-2/checkpoints/0600000.pt",
+                "--in-path", "/home/ubuntu/data/datasets/realsr/lr",
+                "--out-path", "/home/ubuntu/data/datasets/realsr/xs_2_600k_000",
+                "--image-size", "256"
             ],
             "justMyCode": true
         }
