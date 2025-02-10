@@ -13,15 +13,13 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from timm.models.vision_transformer import PatchEmbed, Mlp, Attention
-from torch.jit import Final
-from timm.layers import use_fused_attn
-import torch.nn.functional as F
+from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+
+
 def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    return x * (1 + scale) + shift
 
 
-    
 #################################################################################
 #               Embedding Layers for Timesteps and Class Labels                 #
 #################################################################################
@@ -104,23 +102,27 @@ class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, fused_attn=None, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, fused_attn=fused_attn, **block_kwargs)
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, fused_attn=False, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
-        )
+        self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size ** 0.5)
+        # self.adaLN_modulation = nn.Sequential(
+        #     nn.SiLU(),
+        #     nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        # )
 
     def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        B, N, C = x.shape
+        # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = c.chunk(6, dim=1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.scale_shift_table[None] + c.reshape(B, 6, -1)).chunk(6, dim=1)
+        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 
@@ -138,7 +140,7 @@ class FinalLayer(nn.Module):
         )
 
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        shift, scale = self.adaLN_modulation(c).unsqueeze(1).chunk(2, dim=-1)
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
@@ -157,9 +159,7 @@ class DiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
-        roll_size=32,
         learn_sigma=True,
-        fused_attn=None,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -167,7 +167,6 @@ class DiT(nn.Module):
         self.out_channels = in_channels  if learn_sigma else in_channels // 2
         self.patch_size = patch_size
         self.num_heads = num_heads
-        self.roll_size = roll_size
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -176,9 +175,16 @@ class DiT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, fused_attn=fused_attn) for _ in range(depth)
+            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
+
+
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -203,14 +209,17 @@ class DiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
+        nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
+
         # Zero-out adaLN modulation layers in DiT blocks:
-        for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+        # for block in self.blocks:
+        #     nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+        #     nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        # nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+        # nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
@@ -242,11 +251,10 @@ class DiT(nn.Module):
         t = self.t_embedder(t)                   # (N, D)
         # y = self.y_embedder(y, self.training)    # (N, D)
         # c = t + y  
-        c = t                              #     (N, D)
+        c = self.adaLN_modulation(t)                         #     (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
-            x = torch.roll(x, shifts=self.roll_size, dims=1)
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
+        x = self.final_layer(x, t)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         return x
 
@@ -340,7 +348,7 @@ def DiT_B_8(**kwargs):
     return DiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
 
 def DiT_M_2(**kwargs):
-    return DiT(depth=12, hidden_size=576, patch_size=2, num_heads=8, **kwargs)
+    return DiT(depth=24, hidden_size=384, patch_size=2, num_heads=8, **kwargs)
 
 def DiT_S_2(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
@@ -351,8 +359,11 @@ def DiT_S_4(**kwargs):
 def DiT_S_8(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
 
+def DiT_XS_2_D(**kwargs):
+    return DiT(depth=32, hidden_size=128, patch_size=2, num_heads=2, **kwargs)
+
 def DiT_XS_2(**kwargs):
-    return DiT(depth=8, hidden_size=256, patch_size=2, num_heads=4, **kwargs)
+    return DiT(depth=8, hidden_size=256, patch_size=1, num_heads=4, **kwargs)
 
 def DiT_XXS_2(**kwargs):
     return DiT(depth=6, hidden_size=256, patch_size=2, num_heads=4, **kwargs)
@@ -365,23 +376,59 @@ DiT_models = {
     'DiT-L/2':  DiT_L_2,   'DiT-L/4':  DiT_L_4,   'DiT-L/8':  DiT_L_8,
     'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
     'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8,
-    'DiT-XS/2': DiT_XS_2,  'DiT-XXS/2': DiT_XXS_2,  'DiT-XXS/1': DiT_XXS_1,
-    'DiT-M/2': DiT_M_2,
+    'DiT-XS/2-D': DiT_XS_2_D,
+    'DiT-XS/2': DiT_XS_2,  'DiT-XXS/2': DiT_XXS_2,  'DiT-XXS/1': DiT_XXS_1, 'DiT-M/2': DiT_M_2,
 }
 
-
 if __name__=="__main__":
-    model = DiT_B_4(fused_attn=False)
+    model = DiT_XS_2(input_size=128)
     from torch.utils.flop_counter import FlopCounterMode
+    
 
-    input = torch.randn(1, 16, 32, 32)
-    y = torch.randn(1, 16, 32, 32, device='cpu')
-    t = torch.randn(1, device='cpu')
+    input = torch.randn(1, 16, 128, 128)
+    y = torch.randn(1, 16, 128, 128)
+    t = torch.randn(1)
 
     
     with FlopCounterMode(depth=4):
         model(input, t, y=y)
-
     
+    # 计算参数量
+    def count_parameters(model):
+        total_params = 0
+        for param in model.parameters():
+            if param.requires_grad:  # 只计算可训练的参数
+                total_params += param.numel()  # 累加每个参数的参数量
+        return total_params
 
+    total_params = count_parameters(model)
+    print(f"Total trainable parameters: {total_params}")
 
+    module_param_counts = []
+    total_trainable_params = 0
+
+    for name, module in model.named_modules():
+        # Skip the top-level module (model itself)
+        if name == '':
+            continue
+
+        trainable_params = sum(p.numel() for p in module.parameters() if p.requires_grad)
+        total_trainable_params += trainable_params
+
+        module_param_counts.append({"Module": name, "Parameters": trainable_params})
+
+    # --- Improved part: Parameter count per module ---
+    print("\n--- Parameters per Module ---")
+    module_params = {}
+    for name, module in model.named_children(): # Use named_children to get module names
+        module_param_count = count_parameters(module)
+        module_params[name] = module_param_count
+        print(f"Module '{name}': {module_param_count} parameters")
+
+    print("\n--- Parameter Distribution Chart ---")
+    total_trainable_params = sum(module_params.values())
+    for name, param_count in module_params.items():
+        percentage = (param_count / total_trainable_params) * 100
+        bar_length = int(percentage * 5) # Scale bar length for better visualization
+        bar = "#" * bar_length
+        print(f"{name:10} | {bar:<50} | {param_count} ({percentage:.2f}%)") # Formatted output with chart

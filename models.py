@@ -367,7 +367,7 @@ DiT_models = {
 }
 
 if __name__=="__main__":
-    model = DiT_XS_2_D()
+    model = DiT_S_2()
     from torch.utils.flop_counter import FlopCounterMode
 
     input = torch.randn(1, 16, 32, 32)
