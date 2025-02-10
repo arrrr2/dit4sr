@@ -76,8 +76,10 @@ def main(args):
             img_path = self.image_paths[idx]
             image = Image.open(img_path).convert("RGB")
             size = image.size
+            size = image.size
             if self.transform:
                 image = self.transform(image)
+            return {"img": image, "pat": img_path, "size":size}
             return {"img": image, "pat": img_path, "size":size}
 
 

@@ -49,8 +49,8 @@ data:
 
       final_sinc_prob: 0.8
 
-      gt_size: 256
-      crop_pad_size: 256
+      gt_size: 512
+      crop_pad_size: 512
       use_hflip: True
       use_rot: True
       rescale_gt: False

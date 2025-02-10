@@ -25,7 +25,7 @@ import argparse
 import logging
 import os
 import torch.nn.functional as ff
-from models import DiT_models
+from models_t_aggre import DiT_models
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
 from omegaconf import OmegaConf
@@ -163,10 +163,6 @@ def main(args):
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
-    # warmup_scheduler = LinearLR(opt, start_factor=0.1, end_factor=1.0, total_iters=20000)
-    # annealing_scheduler = CosineAnnealingLR(opt, T_max=400000, eta_min=0.00001)
-    # sch = SequentialLR(opt, schedulers=[warmup_scheduler, annealing_scheduler], milestones=[20000])
-
     sch = LinearLR(opt, start_factor=0.1, end_factor=1.0, total_iters=20000)
 
     dataset_conf = OmegaConf.load(args.dataset)
