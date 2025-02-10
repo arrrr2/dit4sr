@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 import argparse
 import torchvision
 from PIL import Image
+from PIL import ImageOps
+from tqdm import tqdm
 import os
 from sd3_impls import SD3LatentFormat
 import numpy as np # Keep numpy import if gaussian_kernel is still used from diffusion.py
@@ -30,49 +32,31 @@ def main(args):
     if not os.path.exists(out_path):
         os.makedirs(out_path, exist_ok=True)
 
-    def crop_or_pad_to_tar(image, target_size=1024):
 
-        w, h = image.size
+    @torch.no_grad()
+    def pad_to_factor(image:torch.Tensor, factor=1):
+        # 获取原始图片的宽度和高度
+        w, h = image.shape[1], image.shape[2]
 
-        # Calculate cropping coordinates if necessary
-        if w > target_size or h > target_size:
-            left = (w - target_size) // 2 if w > target_size else 0
-            top = (h - target_size) // 2 if h > target_size else 0
-            right = left + target_size if w > target_size else w
-            bottom = top + target_size if h > target_size else h
-            image = image.crop((left, top, right, bottom))
+        # 计算需要填充到的宽度和高度
+        
+        new_w = (w + factor - 1) // factor * factor
+        new_h = (h + factor - 1) // factor * factor
 
-        # Calculate padding if necessary
-        if w < target_size or h < target_size:
-            new_image = Image.new(image.mode, (target_size, target_size), (0, 0, 0)) # Default to black background
-            # Calculate offset to center the original image
-            offset = ((target_size - w) // 2, (target_size - h) // 2)
-            new_image.paste(image, offset, mask=image.getchannel('A') if image.mode == 'RGBA' else None) # Handle RGBA images
-            image = new_image
+        
+        # 如果需要填充
+        if new_w != w or new_h != h:
+            # 计算需要填充的宽度和高度
+            pad_w = new_w - w
+            pad_h = new_h - h
+            # 使用反射填充
+            new_image = torch.nn.functional.pad(image, (0, pad_h, 0, pad_w), mode='reflect')
+
+            return new_image
 
         return image
 
-    def center_crop_image(image, target_size):
 
-        w, h = image.size
-
-        # Resize the image so the shorter side matches the target size
-        if w < h:
-            new_h = int(target_size * h / w)
-            resized_image = image.resize((target_size, new_h), Image.Resampling.BICUBIC)
-        else:
-            new_w = int(target_size * w / h)
-            resized_image = image.resize((new_w, target_size), Image.Resampling.BICUBIC)
-
-        # Perform center crop
-        rw, rh = resized_image.size
-        left = (rw - target_size) // 2
-        top = (rh - target_size) // 2
-        right = left + target_size
-        bottom = top + target_size
-        cropped_image = resized_image.crop((left, top, right, bottom))
-
-        return cropped_image
 
 
     class CustomDataset(torch.utils.data.Dataset):
@@ -91,9 +75,10 @@ def main(args):
         def __getitem__(self, idx):
             img_path = self.image_paths[idx]
             image = Image.open(img_path).convert("RGB")
+            size = image.size
             if self.transform:
                 image = self.transform(image)
-            return {"img": image, "pat": img_path}
+            return {"img": image, "pat": img_path, "size":size}
 
 
     transform = torchvision.transforms.Compose([
@@ -102,6 +87,7 @@ def main(args):
         # torchvision.transforms.Lambda(lambda x: center_crop_image(x, args.image_size)),
         # torchvision.transforms.Resize(args.image_size, interpolation=torchvision.transforms.InterpolationMode.NEAREST), 
         torchvision.transforms.ToTensor(),
+        torchvision.transforms.Lambda(lambda x: pad_to_factor(x, 4)),
         torchvision.transforms.Lambda(lambda x: x * 2 - 1)
     ])
 
@@ -115,8 +101,8 @@ def main(args):
     ).to(device)
     # Auto-download a pre-trained model or load a custom DiT checkpoint from train.py:
     ckpt_path = args.ckpt or f"DiT-XL-2-{args.image_size}x{args.image_size}.pt"
-    state_dict = torch.load(ckpt_path, map_location=device) # Load checkpoint to specified device
-    model.load_state_dict(state_dict['model'])
+    state_dict = torch.load(ckpt_path, map_location=device, weights_only=False) # Load checkpoint to specified device
+    model.load_state_dict(state_dict['ema'])
     model.eval()  # important!
     diffusion = create_diffusion(str(args.num_sampling_steps)) # Use original create_diffusion
     vae = AutoencoderKL.from_pretrained(f"./vae", torch_dtype=torch.float16).to(device) # Load VAE in float16 and move to device
@@ -127,7 +113,7 @@ def main(args):
 
     # Labels to condition the model with (feel free to change):
     # Create sampling noise:
-    for batch in dataloader:
+    for batch in tqdm(dataloader):
 
         # Sample images:
         with torch.no_grad():
@@ -145,7 +131,7 @@ def main(args):
             with torch.autocast(device_type='cuda', dtype=torch.float16): # Use autocast for potential speedup
                 samples = diffusion.ddim_sample_loop_progressive_with_patch_aggregation( # Keep patch aggregation sampling
                     model, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device,
-                    patch_size=latent_size, stride=latent_size // 2,  batch_size_patch=8 # Keep patch aggregation parameters
+                    patch_size=latent_size, stride=latent_size // 2,  batch_size_patch=8# Keep patch aggregation parameters
                 )
                 for sample_dict in samples: # Iterate to get final sample
                     samples = sample_dict['sample']
@@ -158,9 +144,12 @@ def main(args):
 
 
         for i, sample in enumerate(samples):
+            image_size = batch['size']
+            sample = sample.cpu().float()
+            sample = sample[:, :image_size[1] * 4, :image_size[0] * 4]
             img: Image = t2p(sample.cpu()) # Move sample to CPU before converting to PIL Image
             img.save(os.path.join(out_path, paths[i].split("/")[-1]))
-            print(paths[i])
+            # print(paths[i])
 
 
 if __name__ == "__main__":
