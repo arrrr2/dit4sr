@@ -31,6 +31,8 @@ def main(args):
     torch.set_grad_enabled(False)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
+    print(args)
+
     if args.ckpt is None:
         assert args.model == "DiT-XXS/2", "Only DiT-XL/2 models are available for auto-download."
         assert args.image_size in [256, 512]

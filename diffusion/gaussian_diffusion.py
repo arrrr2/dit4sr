@@ -908,7 +908,7 @@ class GaussianDiffusion:
         latent_width = tile_width
         latent_height = tile_height
 
-        var = 0.01
+        var = 0.05
         midpoint = (latent_width - 1) / 2  # -1 because index goes from 0 to latent_width - 1
         x_probs = [exp(-(x-midpoint)*(x-midpoint)/(latent_width*latent_width)/(2*var)) / sqrt(2*pi*var) for x in range(latent_width)]
         midpoint = latent_height / 2
@@ -1174,8 +1174,8 @@ class GaussianDiffusion:
                 input_start_y = ofs_y
                 input_end_y = ofs_y + patch_size
 
-                noise_pred[:, :, input_start_y:input_end_y, input_start_x:input_end_x] += th.cat(noise_preds[row], dim=0)[:, :, input_start_y-ofs_y:input_end_y-ofs_y, input_start_x-ofs_x] * tile_weights[:,:,:input_end_y-ofs_y,:input_end_x-ofs_x] # Apply weights and accumulate
-                contributors[:, :, input_start_y:input_end_y, input_start_x:input_end_x] += tile_weights[:,:,:input_end_y-ofs_y,:input_end_x-ofs_x] # Accumulate weights
+                noise_pred[:, :, input_start_y:input_end_y, input_start_x:input_end_x] += noise_preds[row][col] * tile_weights # Apply weights and accumulate
+                contributors[:, :, input_start_y:input_end_y, input_start_x:input_end_x] += tile_weights # Accumulate weights
 
         # Average overlapping areas with more than 1 contributor
         noise_pred /= (contributors + 1e-8) # Avoid division by zero
@@ -1273,7 +1273,7 @@ class GaussianDiffusion:
                 pos = 0
                 while pos + patch_size <= total_len:
                     positions.append(pos)
-                    pos += (patch_size - stride) if pos > 0 else patch_size
+                    pos += (patch_size - stride) 
                 # 处理最后一个块（确保对齐边界）
                 if positions[-1] + patch_size < total_len:
                     positions.append(total_len - patch_size)
@@ -1349,12 +1349,14 @@ class GaussianDiffusion:
                 w_end = min(w_start + patch_size, w)
                 
                 # 获取有效区域
-                valid_patch = patch[None, :, :h_end-h_start, :w_end-w_start]
-                valid_weights = tile_weights[:, :, :h_end-h_start, :w_end-w_start]
+                # valid_patch = patch[None, :, :h_end-h_start, :w_end-w_start]
+                # valid_weights = tile_weights[:, :, :h_end-h_start, :w_end-w_start]
                 
                 # 累加结果
-                final_output[:, :, h_start:h_end, w_start:w_end] += valid_patch * valid_weights
-                weight_map[:, :, h_start:h_end, w_start:w_end] += valid_weights
+                # final_output[:, :, h_start:h_end, w_start:w_end] += valid_patch * valid_weights
+                # weight_map[:, :, h_start:h_end, w_start:w_end] += valid_weights
 
+                final_output [:, :, h_start:h_end, w_start:w_end] += patch * tile_weights
+                weight_map[:, :, h_start:h_end, w_start:w_end] += tile_weights
             # 归一化处理
             return final_output / weight_map.clamp(min=1e-8)
