@@ -14,6 +14,7 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+from fbi_la.layers import GeneralizedLinearAttention
 
 
 def modulate(x, shift, scale):
@@ -105,7 +106,9 @@ class DiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        # self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, fused_attn=False, **block_kwargs)
+        # self.attn = GeneralizedLinearAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.attn = GeneralizedLinearAttention(query_dim=hidden_size, out_dim=hidden_size, dim_head=hidden_size // num_heads, projection_mid_dim=-1)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -121,10 +124,47 @@ class DiTBlock(nn.Module):
         # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = c.chunk(6, dim=1)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.scale_shift_table[None] + c.reshape(B, 6, -1)).chunk(6, dim=1)
-        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), mode='torch')
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
+class ConvBlock(nn.Module):
+    def __init__(self, hidden_size, kernel_size, stride, padding):
+        super().__init__()
+        self.conv = nn.Conv2d(hidden_size, hidden_size, kernel_size=kernel_size, stride=stride, padding=padding)
+        self.relu = nn.LeakyReLU()
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x, input_shape):
+        x = self.norm(x)
+        x = self.unpatchify(x, input_shape)
+        x = self.conv(x)
+        x = self.patchify(x)
+        x = self.relu(x)
+        
+        return x
+    
+    def unpatchify(self, x, input_shape):
+        """
+        x: (N, T, patch_size**2 * C)
+        imgs: (N, H, W, C)
+        """
+        c = x.shape[-1]
+        h, w = input_shape
+        x = x.reshape(shape=(x.shape[0], h, w, c))
+        x = torch.einsum('nhwc->nchw', x)
+
+        return x
+
+    def patchify(self, x):
+        """
+        imgs: (N, C, H, W)
+        x: (N, T, patch_size**2 * C)
+        """
+        n, c, h, w = x.shape
+        x = torch.einsum('nchw->nhwc', x)
+        x = x.reshape(shape=(n, h * w, c))
+        return x   
 
 class FinalLayer(nn.Module):
     """
@@ -174,9 +214,14 @@ class DiT(nn.Module):
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
-        self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
-        ])
+
+        self.ditblocks = nn.ModuleList(
+            [DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)]
+        )
+        self.convblocks = nn.ModuleList(
+            [ConvBlock(hidden_size, 3, 1, 1) for _ in range(depth)]
+        )
+
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
 
         self.adaLN_modulation = nn.Sequential(
@@ -197,8 +242,8 @@ class DiT(nn.Module):
         self.apply(_basic_init)
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        # pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
+        # self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
         w = self.x_embedder.proj.weight.data
@@ -236,7 +281,24 @@ class DiT(nn.Module):
         x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
-        return imgs
+        return imgs 
+
+    def patchify(self, imgs):
+        """
+        imgs: (N, C, H, W)
+        x: (N, T, patch_size**2 * C)
+        """
+        p = self.x_embedder.patch_size[0]
+        c = self.out_channels
+        h = imgs.shape[2] // p
+        w = imgs.shape[3] // p
+        assert imgs.shape[2] % p == 0 and imgs.shape[3] % p == 0, "Image dimensions must be divisible by the patch size."
+        
+        x = imgs.reshape(shape=(imgs.shape[0], c, h, p, w, p))
+        x = torch.einsum('nchpwq->nhwpqc', x)
+        x = x.reshape(shape=(imgs.shape[0], h * w, p * p * c))
+        return x    
+
 
     def forward(self, x, t, **kwargs):
         """
@@ -247,13 +309,16 @@ class DiT(nn.Module):
         """
         lq = kwargs['y']
         x = torch.cat([x, lq], dim=1)
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        image_shape = (x.shape[2] // self.patch_size, x.shape[3] // self.patch_size)
+        # x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        x = self.x_embedder(x)
         t = self.t_embedder(t)                   # (N, D)
         # y = self.y_embedder(y, self.training)    # (N, D)
         # c = t + y  
-        c = self.adaLN_modulation(t)                         #     (N, D)
-        for block in self.blocks:
-            x = block(x, c)                      # (N, T, D)
+        c = self.adaLN_modulation(t)
+        for _ in range(len(self.ditblocks)):
+            x = self.ditblocks[_](x, c)
+            x = self.convblocks[_](x, image_shape)  
         x = self.final_layer(x, t)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         return x
@@ -363,7 +428,13 @@ def DiT_XS_2_D(**kwargs):
     return DiT(depth=32, hidden_size=128, patch_size=2, num_heads=2, **kwargs)
 
 def DiT_XS_2(**kwargs):
-    return DiT(depth=8, hidden_size=256, patch_size=1, num_heads=4, **kwargs)
+    return DiT(depth=8, hidden_size=256, patch_size=2, num_heads=4, **kwargs)
+
+def DiT_XS_4(**kwargs):
+    return DiT(depth=8, hidden_size=256, patch_size=4, num_heads=4, **kwargs)
+
+def DiT_XS_8(**kwargs):
+    return DiT(depth=8, hidden_size=256, patch_size=8, num_heads=4, **kwargs)
 
 def DiT_XXS_2(**kwargs):
     return DiT(depth=6, hidden_size=256, patch_size=2, num_heads=4, **kwargs)
@@ -377,21 +448,22 @@ DiT_models = {
     'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
     'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8,
     'DiT-XS/2-D': DiT_XS_2_D,
-    'DiT-XS/2': DiT_XS_2,  'DiT-XXS/2': DiT_XXS_2,  'DiT-XXS/1': DiT_XXS_1, 'DiT-M/2': DiT_M_2,
+    'DiT-XS/2': DiT_XS_2, 'DiT-XS/4': DiT_XS_4, 'DiT-XS/8': DiT_XS_8,
+    'DiT-XXS/2': DiT_XXS_2,  'DiT-XXS/1': DiT_XXS_1, 'DiT-M/2': DiT_M_2,
 }
 
 if __name__=="__main__":
-    model = DiT_XS_2(input_size=128)
+    model = DiT_XS_8(input_size=512)
     from torch.utils.flop_counter import FlopCounterMode
     
 
-    input = torch.randn(1, 16, 128, 128)
-    y = torch.randn(1, 16, 128, 128)
-    t = torch.randn(1)
+    input = torch.randn(16, 16, 512, 512)
+    y = torch.randn(16, 16, 512, 512)
+    t = torch.randn(16)
 
-    
-    with FlopCounterMode(depth=4):
-        model(input, t, y=y)
+    print(model)
+    # with FlopCounterMode(depth=4):
+    #     model(input, t, y=y)
     
     # 计算参数量
     def count_parameters(model):
@@ -425,10 +497,33 @@ if __name__=="__main__":
         module_params[name] = module_param_count
         print(f"Module '{name}': {module_param_count} parameters")
 
-    print("\n--- Parameter Distribution Chart ---")
-    total_trainable_params = sum(module_params.values())
-    for name, param_count in module_params.items():
-        percentage = (param_count / total_trainable_params) * 100
-        bar_length = int(percentage * 5) # Scale bar length for better visualization
-        bar = "#" * bar_length
-        print(f"{name:10} | {bar:<50} | {param_count} ({percentage:.2f}%)") # Formatted output with chart
+
+    # --- Memory Usage Measurement ---
+    print("\n--- Memory Usage ---")
+
+    # --- GPU memory (if available) ---
+    if torch.cuda.is_available():
+        initial_gpu_memory = torch.cuda.memory_allocated() # Get initial GPU memory usage
+        torch.cuda.synchronize()
+        model, input, t, y = model.cuda(), input.cuda(), t.cuda(), y.cuda() # Move model and input to GPU
+        with torch.no_grad(): 
+            with torch.autocast("cuda"): model(input, t, y=y) # Run the model to allocate memory
+        torch.cuda.synchronize()
+        final_gpu_memory = torch.cuda.memory_allocated() # Get GPU memory usage after model run
+        gpu_memory_usage = final_gpu_memory - initial_gpu_memory
+        print(f"GPU Memory Usage: {gpu_memory_usage / (1024**2):.2f} MB") # Convert to MB
+
+        max_gpu_memory_allocated = torch.cuda.max_memory_allocated()
+        print(f"Max GPU Memory Allocated: {max_gpu_memory_allocated / (1024**2):.2f} MB") # Convert to MB
+        torch.cuda.reset_peak_memory_stats() # Reset peak memory stats for future measurements if needed
+
+    else:
+        print("CUDA is not available, skipping GPU memory measurement.")
+
+    import psutil
+    # --- System RAM memory ---
+    initial_ram_usage = psutil.Process().memory_info().rss # in bytes
+    model(input, t, y=y) # Run the model again to measure RAM usage (if not already run above)
+    final_ram_usage = psutil.Process().memory_info().rss # in bytes
+    ram_memory_usage = final_ram_usage - initial_ram_usage
+    print(f"RAM Memory Usage: {ram_memory_usage / (1024**2):.2f} MB") # Convert to MB

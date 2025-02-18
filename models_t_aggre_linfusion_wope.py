@@ -14,6 +14,7 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+from fbi_la.layers import GeneralizedLinearAttention
 
 
 def modulate(x, shift, scale):
@@ -105,7 +106,9 @@ class DiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        # self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, fused_attn=False, **block_kwargs)
+        # self.attn = GeneralizedLinearAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.attn = GeneralizedLinearAttention(query_dim=hidden_size, out_dim=hidden_size, dim_head=hidden_size // num_heads, )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -121,7 +124,7 @@ class DiTBlock(nn.Module):
         # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = c.chunk(6, dim=1)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.scale_shift_table[None] + c.reshape(B, 6, -1)).chunk(6, dim=1)
-        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), mode='torch')
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
@@ -197,8 +200,8 @@ class DiT(nn.Module):
         self.apply(_basic_init)
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        # pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
+        # self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
         w = self.x_embedder.proj.weight.data
@@ -236,7 +239,7 @@ class DiT(nn.Module):
         x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
-        return imgs
+        return imgs 
 
     def forward(self, x, t, **kwargs):
         """
@@ -247,7 +250,8 @@ class DiT(nn.Module):
         """
         lq = kwargs['y']
         x = torch.cat([x, lq], dim=1)
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        # x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        x = self.x_embedder(x)
         t = self.t_embedder(t)                   # (N, D)
         # y = self.y_embedder(y, self.training)    # (N, D)
         # c = t + y  
@@ -381,12 +385,12 @@ DiT_models = {
 }
 
 if __name__=="__main__":
-    model = DiT_XS_2(input_size=128)
+    model = DiT_XS_2(input_size=64)
     from torch.utils.flop_counter import FlopCounterMode
     
 
-    input = torch.randn(1, 16, 128, 128)
-    y = torch.randn(1, 16, 128, 128)
+    input = torch.randn(1, 16, 64, 64)
+    y = torch.randn(1, 16, 64, 64)
     t = torch.randn(1)
 
     
@@ -425,10 +429,10 @@ if __name__=="__main__":
         module_params[name] = module_param_count
         print(f"Module '{name}': {module_param_count} parameters")
 
-    print("\n--- Parameter Distribution Chart ---")
-    total_trainable_params = sum(module_params.values())
-    for name, param_count in module_params.items():
-        percentage = (param_count / total_trainable_params) * 100
-        bar_length = int(percentage * 5) # Scale bar length for better visualization
-        bar = "#" * bar_length
-        print(f"{name:10} | {bar:<50} | {param_count} ({percentage:.2f}%)") # Formatted output with chart
+    # print("\n--- Parameter Distribution Chart ---")
+    # total_trainable_params = sum(module_params.values())
+    # for name, param_count in module_params.items():
+    #     percentage = (param_count / total_trainable_params) * 100
+    #     bar_length = int(percentage * 5) # Scale bar length for better visualization
+    #     bar = "#" * bar_length
+    #     print(f"{name:10} | {bar:<50} | {param_count} ({percentage:.2f}%)") # Formatted output with chart
