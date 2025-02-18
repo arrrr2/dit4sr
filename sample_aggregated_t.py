@@ -6,7 +6,7 @@ from torchvision.utils import save_image
 from diffusion import create_diffusion # Keep original create_diffusion import
 from diffusers.models import AutoencoderKL
 from download import find_model
-from models import DiT_models
+from models_t_aggre import DiT_models
 from torch.utils.data import DataLoader
 import argparse
 import torchvision
@@ -80,8 +80,6 @@ def main(args):
             if self.transform:
                 image = self.transform(image)
             return {"img": image, "pat": img_path, "size":size}
-            return {"img": image, "pat": img_path, "size":size}
-
 
     transform = torchvision.transforms.Compose([
         # torchvision.transforms.Lambda(lambda x: crop_devided_by(x, 16)),
@@ -105,6 +103,8 @@ def main(args):
     ckpt_path = args.ckpt or f"DiT-XL-2-{args.image_size}x{args.image_size}.pt"
     state_dict = torch.load(ckpt_path, map_location=device, weights_only=False) # Load checkpoint to specified device
     # model.load_state_dict(state_dict['ema'])
+
+
 
     current_state_dict = model.state_dict()
     mismatched_state_dict = state_dict['ema']
@@ -150,7 +150,7 @@ def main(args):
             paths = batch['pat']
             # images = torch.nn.functional.interpolate(images, scale_factor=4, mode='nearest')
             images = images.to(torch.float16) # Convert images to float16 before encoding
-            images = ff.interpolate(images, scale_factor=args.scale_factor)
+            images = ff.interpolate(images, scale_factor=4)
 
             latents = vae.encode(images).latent_dist.mode()
             latents = pin(latents)
@@ -160,7 +160,7 @@ def main(args):
             with torch.autocast(device_type='cuda', dtype=torch.float16): # Use autocast for potential speedup
                 samples = diffusion.ddim_sample_loop_progressive_with_patch_aggregation( # Keep patch aggregation sampling
                     model, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device,
-                    patch_size=latent_size, stride=latent_size // 2,  batch_size_patch=12# Keep patch aggregation parameters
+                    patch_size=latent_size, stride=latent_size // 2,  batch_size_patch=8# Keep patch aggregation parameters
                 )
                 for sample_dict in samples: # Iterate to get final sample
                     samples = sample_dict['sample']
@@ -192,6 +192,5 @@ if __name__ == "__main__":
                         help="Optional path to a DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).")
     parser.add_argument("--in-path", type=str, default="/home/ubuntu/data/repos/ResShift/testdata/Val_SR/lq")
     parser.add_argument("--out-path", type=str, default="/home/ubuntu/data/repos/ResShift/testdata/Val_SR/ditxs0")
-    parser.add_argument("--scale_factor", type=int, default=4)
     args = parser.parse_args()
     main(args)
