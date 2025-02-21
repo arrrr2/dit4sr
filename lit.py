@@ -72,7 +72,7 @@ class dwc_ffn(nn.Module):
         self.mlp_conv = nn.Conv2d(in_channels=hidden_size, out_channels=mid_size, kernel_size=1)
 
         self.dwconv = nn.Conv2d(in_channels=hidden_size, out_channels=mid_size, kernel_size=kernel_size,
-                                groups=hidden_size // num_heads, padding=kernel_size // 2)
+                                groups= hidden_size // num_heads, padding=kernel_size // 2)
         
         self.kernel_function = kernel_function()
 
@@ -91,7 +91,7 @@ class dwc_ffn(nn.Module):
         x0 = self.mlp_conv(x)
         x1 = self.dwconv(x)
 
-        x = x0 * (1 + self.kernel_function(x1))
+        x = x0 * self.kernel_function(x1) 
 
         x = self.after_conv(x)
 

@@ -239,18 +239,23 @@ class DiT(nn.Module):
         input_size=32,
         patch_size=2,
         in_channels=32,
+        out_channels=32,
         hidden_size=1152,
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
         learn_sigma=True,
         grad_checkpoint=False,
+        cond_channels = None,
+        x_channels=16,
+        scale_factor=None,
+
         **kwargs
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
-        self.out_channels = in_channels  if learn_sigma else in_channels // 2
+        self.out_channels = out_channels  if learn_sigma else out_channels // 2
         self.patch_size = patch_size
         self.num_heads = num_heads
         self.use_checkpoint = grad_checkpoint
@@ -273,6 +278,14 @@ class DiT(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
 
+        if scale_factor is not None:
+            res_channels = in_channels - x_channels
+            self.cond_process = nn.Sequential(
+                nn.Upsample(scale_factor, mode='bicubic',),
+                nn.Conv2d(cond_channels, res_channels, kernel_size=5, padding=2),
+            )
+        else:
+            self.cond_process = nn.Identity()
 
         self.initialize_weights()
 
@@ -353,6 +366,7 @@ class DiT(nn.Module):
         y: (N,) tensor of class labels
         """
         lq = kwargs['y']
+        lq = self.cond_process(lq)
         x = torch.cat([x, lq], dim=1)
         image_shape = (x.shape[2] // self.patch_size, x.shape[3] // self.patch_size)
         # x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
@@ -484,6 +498,9 @@ def DiT_XS_2(**kwargs):
 def DiT_XS_1(**kwargs):
     return DiT(depth=8, hidden_size=256, patch_size=1, num_heads=4, **kwargs)
 
+def DiT_XS_1_D(**kwargs):
+    return DiT(depth=32, hidden_size=128, patch_size=1, num_heads=2, **kwargs)
+
 def DiT_XS_4(**kwargs):
     return DiT(depth=8, hidden_size=256, patch_size=4, num_heads=4, **kwargs)
 
@@ -508,13 +525,13 @@ DiT_models = {
 
 if __name__=="__main__":
 
-    device = "cuda:3"
-    model = DiT_S_1(input_size=64)
+    device = "cuda:0"
+    model = DiT_XS_1_D(input_size=64)
     from torch.utils.flop_counter import FlopCounterMode
     
 
-    input = torch.randn(1, 16, 240, 135)
-    y = torch.randn(1, 16, 240, 135)
+    input = torch.randn(1, 16, 64, 64)
+    y = torch.randn(1, 16, 64, 64)
     t = torch.randn(1)
 
     print(model)
