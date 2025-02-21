@@ -66,7 +66,7 @@ def save_response_content(response, destination, file_size=None, chunk_size=3276
             pbar.close()
 
 
-def load_file_from_url(url, model_dir=None, progress=True, file_name=None):
+def load_file_from_url(url, model_dir=None, progress=False, file_name=None):
     """Load file form http url, will download models if necessary.
 
     Reference: https://github.com/1adrianb/face-alignment/blob/master/face_alignment/utils.py

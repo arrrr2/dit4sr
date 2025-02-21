@@ -14,15 +14,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import math
-from timm.models.vision_transformer import PatchEmbed,  Mlp
-from linattn import GeneralizedLinearAttention
+from timm.models.vision_transformer import  Mlp
+from lit import LinearAttention, dwc_ffn
 from typing import Union, Tuple
+
+from torch.utils.checkpoint import checkpoint
 
 class PatchEmbed(nn.Module):
     """ 2D Image to Patch Embedding
     """
-
-
     def __init__(
             self,
             patch_size: Union[int, Tuple[int, int]] = 16,
@@ -137,25 +137,28 @@ class DiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        # self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, fused_attn=False, **block_kwargs)
+        self.attn = LinearAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         # self.attn = GeneralizedLinearAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
-        self.attn = GeneralizedLinearAttention(query_dim=hidden_size, out_dim=hidden_size, dim_head=hidden_size // num_heads, projection_mid_dim=-1)
+
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        # mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        # approx_gelu = lambda: nn.GELU(approximate="tanh")
+        # self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+
+        self.mlp = dwc_ffn(hidden_size, mlp_ratio=mlp_ratio, num_heads=num_heads)
+
         self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size ** 0.5)
         # self.adaLN_modulation = nn.Sequential(
         #     nn.SiLU(),
         #     nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         # )
 
-    def forward(self, x, c):
+    def forward(self, x, c, image_shape):
         B, N, C = x.shape
         # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = c.chunk(6, dim=1)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.scale_shift_table[None] + c.reshape(B, 6, -1)).chunk(6, dim=1)
-        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), mode='torch')
+        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), image_shape)
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
@@ -201,21 +204,31 @@ class FinalLayer(nn.Module):
     """
     The final layer of DiT.
     """
-    def __init__(self, hidden_size, patch_size, out_channels):
+    def __init__(self, hidden_size, patch_size, out_channels, kernel_size=3):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.last_conv = nn.Conv2d(hidden_size, hidden_size, kernel_size=kernel_size, padding=kernel_size // 2)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
             nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         )
 
-    def forward(self, x, c):
+    def forward(self, x, c, HW=None):
+        if HW is None:
+            h = w = int(x.shape[1] ** 0.5)
+        else: 
+            h, w = HW
+
+        
         shift, scale = self.adaLN_modulation(c).unsqueeze(1).chunk(2, dim=-1)
         x = modulate(self.norm_final(x), shift, scale)
+
+        x = x.reshape(x.shape[0], h, w, -1).permute(0, 3, 1, 2)
+        x = self.last_conv(x)
+        x = x.permute(0, 2, 3, 1).reshape(x.shape[0], -1, x.shape[1])
         x = self.linear(x)
         return x
-
 
 class DiT(nn.Module):
     """
@@ -231,6 +244,8 @@ class DiT(nn.Module):
         num_heads=16,
         mlp_ratio=4.0,
         learn_sigma=True,
+        grad_checkpoint=False,
+        **kwargs
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -238,20 +253,18 @@ class DiT(nn.Module):
         self.out_channels = in_channels  if learn_sigma else in_channels // 2
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.use_checkpoint = grad_checkpoint
 
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.x_embedder = PatchEmbed(patch_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        num_patches = self.x_embedder.num_patches
-        # Will use fixed sin-cos embedding:
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
 
         self.ditblocks = nn.ModuleList(
             [DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)]
         )
-        self.convblocks = nn.ModuleList(
-            [ConvBlock(hidden_size, 3, 1, 1) for _ in range(depth)]
-        )
+        # self.convblocks = nn.ModuleList(
+        #     [ConvBlock(hidden_size, 3, 1, 1) for _ in range(depth)]
+        # )
 
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
 
@@ -299,19 +312,20 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    def unpatchify(self, x):
+    def unpatchify(self, x, hw=None):
         """
         x: (N, T, patch_size**2 * C)
         imgs: (N, H, W, C)
         """
         c = self.out_channels
         p = self.x_embedder.patch_size[0]
-        h = w = int(x.shape[1] ** 0.5)
-        assert h * w == x.shape[1]
+        if hw is None: h = w = int(x.shape[1] ** 0.5)
+        else: h, w = hw
+        assert h * w == x.shape[1], f"h={h}, w={w}, x.shape[1]={x.shape[1]}"
 
         x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
         x = torch.einsum('nhwpqc->nchpwq', x)
-        imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
+        imgs = x.reshape(shape=(x.shape[0], c, h * p, w * p))
         return imgs 
 
     def patchify(self, imgs):
@@ -348,10 +362,13 @@ class DiT(nn.Module):
         # c = t + y  
         c = self.adaLN_modulation(t)
         for _ in range(len(self.ditblocks)):
-            x = self.ditblocks[_](x, c)
-            x = self.convblocks[_](x, image_shape)  
+            if self.use_checkpoint:
+                x = checkpoint(self.ditblocks[_], x, c, image_shape)
+            else:
+                x = self.ditblocks[_](x, c, image_shape)
+            # x = self.convblocks[_](x, image_shape)  
         x = self.final_layer(x, t)                # (N, T, patch_size ** 2 * out_channels)
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
+        x = self.unpatchify(x, image_shape)                   # (N, out_channels, H, W)
         return x
 
 
@@ -455,11 +472,17 @@ def DiT_S_4(**kwargs):
 def DiT_S_8(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
 
+def DiT_S_1(**kwargs):
+    return DiT(depth=12, hidden_size=384, patch_size=1, num_heads=6, **kwargs)
+
 def DiT_XS_2_D(**kwargs):
     return DiT(depth=32, hidden_size=128, patch_size=2, num_heads=2, **kwargs)
 
 def DiT_XS_2(**kwargs):
     return DiT(depth=8, hidden_size=256, patch_size=2, num_heads=4, **kwargs)
+
+def DiT_XS_1(**kwargs):
+    return DiT(depth=8, hidden_size=256, patch_size=1, num_heads=4, **kwargs)
 
 def DiT_XS_4(**kwargs):
     return DiT(depth=8, hidden_size=256, patch_size=4, num_heads=4, **kwargs)
@@ -477,24 +500,26 @@ DiT_models = {
     'DiT-XL/2': DiT_XL_2,  'DiT-XL/4': DiT_XL_4,  'DiT-XL/8': DiT_XL_8,
     'DiT-L/2':  DiT_L_2,   'DiT-L/4':  DiT_L_4,   'DiT-L/8':  DiT_L_8,
     'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
-    'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8,
+    'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8, 
     'DiT-XS/2-D': DiT_XS_2_D,
-    'DiT-XS/2': DiT_XS_2, 'DiT-XS/4': DiT_XS_4, 'DiT-XS/8': DiT_XS_8,
+    'DiT-XS/2': DiT_XS_2, 'DiT-XS/4': DiT_XS_4, 'DiT-XS/8': DiT_XS_8, 'DiT-XS/1': DiT_XS_1,
     'DiT-XXS/2': DiT_XXS_2,  'DiT-XXS/1': DiT_XXS_1, 'DiT-M/2': DiT_M_2,
 }
 
 if __name__=="__main__":
-    model = DiT_XS_8(input_size=512)
+
+    device = "cuda:3"
+    model = DiT_S_1(input_size=64)
     from torch.utils.flop_counter import FlopCounterMode
     
 
-    input = torch.randn(16, 16, 512, 512)
-    y = torch.randn(16, 16, 512, 512)
-    t = torch.randn(16)
+    input = torch.randn(1, 16, 240, 135)
+    y = torch.randn(1, 16, 240, 135)
+    t = torch.randn(1)
 
     print(model)
-    # with FlopCounterMode(depth=4):
-    #     model(input, t, y=y)
+    with FlopCounterMode(depth=4):
+        model(input, t, y=y)
     
     # 计算参数量
     def count_parameters(model):
@@ -534,19 +559,21 @@ if __name__=="__main__":
 
     # --- GPU memory (if available) ---
     if torch.cuda.is_available():
-        initial_gpu_memory = torch.cuda.memory_allocated() # Get initial GPU memory usage
-        torch.cuda.synchronize()
-        model, input, t, y = model.cuda(), input.cuda(), t.cuda(), y.cuda() # Move model and input to GPU
-        with torch.no_grad(): 
-            with torch.autocast("cuda"): model(input, t, y=y) # Run the model to allocate memory
-        torch.cuda.synchronize()
-        final_gpu_memory = torch.cuda.memory_allocated() # Get GPU memory usage after model run
+        initial_gpu_memory = torch.cuda.memory_allocated(device=device) # Get initial GPU memory usage
+        torch.cuda.synchronize(device=device)
+        model, input, t, y = model.to(device=device), input.to(device=device), t.to(device=device), y.to(device=device) # Move model and input to GPU
+        # with torch.no_grad(): 
+        #     with torch.autocast("cuda"): model(input, t, y=y) # Run the model to allocate memory
+        with torch.autocast("cuda"): 
+            model(input, t, y=y)
+        torch.cuda.synchronize(device=device)
+        final_gpu_memory = torch.cuda.memory_allocated(device=device) # Get GPU memory usage after model run
         gpu_memory_usage = final_gpu_memory - initial_gpu_memory
         print(f"GPU Memory Usage: {gpu_memory_usage / (1024**2):.2f} MB") # Convert to MB
 
-        max_gpu_memory_allocated = torch.cuda.max_memory_allocated()
+        max_gpu_memory_allocated = torch.cuda.max_memory_allocated(device=device)
         print(f"Max GPU Memory Allocated: {max_gpu_memory_allocated / (1024**2):.2f} MB") # Convert to MB
-        torch.cuda.reset_peak_memory_stats() # Reset peak memory stats for future measurements if needed
+        torch.cuda.reset_peak_memory_stats(device=device) # Reset peak memory stats for future measurements if needed
 
     else:
         print("CUDA is not available, skipping GPU memory measurement.")

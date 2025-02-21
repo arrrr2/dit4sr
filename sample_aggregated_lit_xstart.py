@@ -6,7 +6,7 @@ from torchvision.utils import save_image
 from diffusion import create_diffusion # Keep original create_diffusion import
 from diffusers.models import AutoencoderKL
 from download import find_model
-from models_t_aggre_linfusion_convpe import DiT_models
+from models_t_aggre_lit import DiT_models
 from torch.utils.data import DataLoader
 import argparse
 import torchvision
@@ -82,6 +82,10 @@ def main(args):
             return {"img": image, "pat": img_path, "size":size}
 
     transform = torchvision.transforms.Compose([
+        # torchvision.transforms.Lambda(lambda x: crop_devided_by(x, 16)),
+        # torchvision.transforms.Lambda(lambda x: crop_or_pad_to_tar(x, 1024)),
+        # torchvision.transforms.Lambda(lambda x: center_crop_image(x, args.image_size)),
+        # torchvision.transforms.Resize(args.image_size, interpolation=torchvision.transforms.InterpolationMode.NEAREST), 
         torchvision.transforms.ToTensor(),
         torchvision.transforms.Lambda(lambda x: pad_to_factor(x, 4)),
         torchvision.transforms.Lambda(lambda x: x * 2 - 1)
@@ -103,7 +107,7 @@ def main(args):
 
 
     current_state_dict = model.state_dict()
-    mismatched_state_dict = state_dict['model']
+    mismatched_state_dict = state_dict['ema']
 
     filtered_state_dict = {
         key: value
@@ -117,8 +121,6 @@ def main(args):
         if not (key in current_state_dict and value.shape == current_state_dict[key].shape)
     ]
 
-    for key, value in mismatched_state_dict.items():
-        print(f"Loading key '{key}' with shape {value.shape}. Max value: {value.max()}, Min value: {value.min()}; Avg value: {value.mean()}; Avg abs value: {value.abs().mean()}.")
     for key in mismatched_keys:
         if key in mismatched_state_dict and key in current_state_dict:
             print(f"Warning: Shape mismatch for key '{key}'. Skipping.")
@@ -131,7 +133,8 @@ def main(args):
 
 
     model.eval()  # important!
-    diffusion = create_diffusion(str(args.num_sampling_steps)) # Use original create_diffusion
+    # model = torch.compile(model, mode="max-autotune")
+    diffusion = create_diffusion(str(args.num_sampling_steps), predict_xstart=True) # Use original create_diffusion
     vae = AutoencoderKL.from_pretrained(f"./vae", torch_dtype=torch.float16).to(device) # Load VAE in float16 and move to device
     t2p = torchvision.transforms.ToPILImage()
 
@@ -148,7 +151,7 @@ def main(args):
             paths = batch['pat']
             # images = torch.nn.functional.interpolate(images, scale_factor=4, mode='nearest')
             images = images.to(torch.float16) # Convert images to float16 before encoding
-            images = ff.interpolate(images, scale_factor=4)
+            images = ff.interpolate(images, scale_factor=args.scale_factor)
 
             latents = vae.encode(images).latent_dist.mode()
             latents = pin(latents)
@@ -156,9 +159,13 @@ def main(args):
             z = torch.randn(len(images), 16, latents.shape[2], latents.shape[3], device=device, dtype=torch.float32) # Ensure z is float32 and on device
             model_kwargs = dict(y=latents)
             with torch.autocast(device_type='cuda', dtype=torch.float16): # Use autocast for potential speedup
-                samples = diffusion.ddim_sample_loop_progressive_with_patch_aggregation( # Keep patch aggregation sampling
+                # samples = diffusion.ddim_sample_loop_progressive_with_patch_aggregation( # Keep patch aggregation sampling
+                #     model, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device,
+                #     patch_size=latent_size, stride=latent_size // 2,  batch_size_patch=12# Keep patch aggregation parameters
+                # )
+                samples = diffusion.ddim_sample_loop_progressive( # Keep patch aggregation sampling
                     model, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device,
-                    patch_size=latent_size, stride=latent_size // 2,  batch_size_patch=12# Keep patch aggregation parameters
+                    # patch_size=latent_size, stride=latent_size // 2,  batch_size_patch=12# Keep patch aggregation parameters
                 )
                 for sample_dict in samples: # Iterate to get final sample
                     samples = sample_dict['sample']
@@ -188,7 +195,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--ckpt", type=str, default="./results/000-DiT-XS-2/checkpoints/0200000.pt",
                         help="Optional path to a DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).")
-    parser.add_argument("--in-path", type=str, default="/home/ubuntu/data/repos/ResShift/testdata/Val_SR/lq")
+    parser.add_argument("--in-path", type=str, default="/home/ubuntu/data/datasets/realsr/lr")
     parser.add_argument("--out-path", type=str, default="/home/ubuntu/data/repos/ResShift/testdata/Val_SR/ditxs0")
+    parser.add_argument("--scale_factor", type=int, default=4)
     args = parser.parse_args()
     main(args)

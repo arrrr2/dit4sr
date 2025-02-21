@@ -819,6 +819,8 @@ class GaussianDiffusion:
             }[self.model_mean_type]
             assert model_output.shape == target.shape == x_start.shape
             terms["mse"] = mean_flat((target - model_output) ** 2)
+            if self.model_mean_type == ModelMeanType.EPSILON:
+                terms["model_outputs"]  = self._predict_xstart_from_eps(x_t, t, model_output)
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]
             else:
@@ -900,7 +902,7 @@ class GaussianDiffusion:
         }
         
 
-    def _gaussian_weights(self, tile_width, tile_height, nbatches):
+    def _gaussian_weights(self, tile_width, tile_height, nbatches, input_channels):
         """Generates a gaussian mask of weights for tile contributions"""
         from numpy import pi, exp, sqrt
         import numpy as np
@@ -916,7 +918,7 @@ class GaussianDiffusion:
 
         weights = np.outer(y_probs, x_probs)
         weights_tensor = th.tensor(weights, device="cpu")
-        return th.tile(weights_tensor, (nbatches, 16, 1, 1)) # Assuming model_channels is accessible, otherwise replace with C
+        return th.tile(weights_tensor, (nbatches, input_channels, 1, 1)) # Assuming model_channels is accessible, otherwise replace with C
 
 
     def get_patches(self, x, patch_size, stride):
@@ -1224,7 +1226,7 @@ class GaussianDiffusion:
 
             indices = tqdm(indices)
 
-        tile_weights = self._gaussian_weights(patch_size, patch_size, 1) # Calculate tile_weights once
+        tile_weights = self._gaussian_weights(patch_size, patch_size, 1, shape[1] // 2) # Calculate tile_weights once
 
         for i in indices:
             t = th.tensor([i] * shape[0], device=device)

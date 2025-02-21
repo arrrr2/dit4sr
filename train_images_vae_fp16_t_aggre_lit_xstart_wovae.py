@@ -25,7 +25,7 @@ import argparse
 import logging
 import os
 import torch.nn.functional as ff
-from models_t_aggre_linfusion_convpe import DiT_models
+from models_t_aggre_lit import DiT_models
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
 from omegaconf import OmegaConf
@@ -147,18 +147,16 @@ def main(args):
     else:
         logger = create_logger(None)
 
-    # Create model:
-    assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
-    latent_size = args.image_size // 8
+    latent_size = args.image_size
     model = DiT_models[args.model](
         input_size=latent_size,
+        in_channels=6,
     )
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
     model = DDP(model.to(device), device_ids=[rank])
-    diffusion = create_diffusion(timestep_respacing="", diffusion_steps=1000)  # default: 1000 steps, linear noise schedule
-    vae = AutoencoderKL.from_pretrained(f"./vae", torch_dtype=torch.bfloat16).to(device)
+    diffusion = create_diffusion(timestep_respacing="", diffusion_steps=1000, predict_xstart=True)  # default: 1000 steps, linear noise schedule
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
@@ -170,7 +168,6 @@ def main(args):
     
     if args.compile:
         model = torch.compile(model,  mode="max-autotune")
-        vae.encode = torch.compile(vae.encode, fullgraph=True, mode="max-autotune")
 
     sampler = DistributedSampler(
         dataset,
@@ -235,16 +232,14 @@ def main(args):
                     saving = (saving * 255).to(torch.uint8).cpu().numpy().transpose(1, 2, 0)
                     saving = Image.fromarray(saving)
                     saving.save(f"test.png")
-                if args.no_sample: x, y = vae.encode(x).latent_dist.mode().clone(), vae.encode(y).latent_dist.mode().clone()
-                else: x, y = vae.encode(x).latent_dist.sample().clone(), vae.encode(y).latent_dist.sample().clone()
+
                 if args.unconditional_included:
                     # select 8 samples within a batch of y to be unconditional: mutiply by 0
                     # print(y[:, 0, 0, 0])
                     unconditional_indices = torch.randperm(y.shape[0])[:8]
-                    y[unconditional_indices] = 0.
+                    y[unconditional_indices] = torch.rand_like(y[unconditional_indices]) * 2 - 1
                     # print(y[:, 0, 0, 0])
 
-                x, y = pin(x), pin(y)
                 x, y = t32(x), t32(y)
             with torch.autocast("cuda", enabled=True):
                 
