@@ -152,6 +152,9 @@ def main(args):
     latent_size = args.image_size // 8
     model = DiT_models[args.model](
         input_size=latent_size,
+        scale_factor=4,
+        cond_channels=3,
+        learn_sigma=False
     )
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
@@ -159,7 +162,8 @@ def main(args):
     model = DDP(model.to(device), device_ids=[rank])
     # diffusion = create_diffusion(timestep_respacing="", diffusion_steps=1000, predict_xstart=True)  # default: 1000 steps, linear noise schedule
     diffusion = create_resshift_diffusion(schedule_name="exponential", schedule_kwargs=dict(power=0.3),
-                                          etas_end=0.99, steps=15, min_noise_level=0.04, kappa=2, normalize_input=True, latent_flag=True)
+                                          etas_end=0.99, steps=15, min_noise_level=0.04, kappa=2, normalize_input=True, latent_flag=True,
+                                          scale_factor=1.0)
     vae = AutoencoderKL.from_pretrained(f"./vae", torch_dtype=torch.bfloat16).to(device)
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -250,11 +254,11 @@ def main(args):
             # y = y.to(device, non_blocking=True)
             opt.zero_grad()
             with torch.autocast("cuda", enabled=True):
-                # t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-                t = non_uniform_sampler(x.shape[0], diffusion.num_timesteps, args.bernoulli_mid, args.bernoulli_p, device)
+                t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
+                # t = non_uniform_sampler(x.shape[0], diffusion.num_timesteps, args.bernoulli_mid, args.bernoulli_p, device)
                 model_kwargs = dict(y=y)
                 # loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-                loss_dict = diffusion.training_losses(model, first_stage_model, x, y, t, model_kwargs=model_kwargs)
+                loss_dict = diffusion.training_losses(model=model, x_start=x, y=y, t=t, first_stage_model=first_stage_model, model_kwargs=model_kwargs)
                 loss = loss_dict["loss"].mean()
             scaler.scale(loss).backward()
             scaler.step(opt)
@@ -281,13 +285,15 @@ def main(args):
                 start_time = time()
 
                 # log result images:
-                if rank == 0:
+                if rank == 1:
                     model_output = loss_dict["pred_zstart"].detach()
                     src = loss_dict["z_t"].detach()
                     
                     model_output, src = model_output[0], src[0]
-                    model_output, src = model_output.detach().clone(), src.detach().clone()
-                    model_output, src = first_stage_model.decode(model_output), first_stage_model.decode(src)
+                    print(f"model_output.shape: {model_output.shape}, src.shape: {src.shape}")
+                    model_output, src = model_output.unsqueeze(0), src.unsqueeze(0)
+                    model_output, src = first_stage_model.decode(model_output).clone(), first_stage_model.decode(src).clone()
+                    model_output, src = model_output.squeeze(0), src.squeeze(0)
 
                     model_output = model_output / 2 + 0.5
                     src = src / 2 + 0.5
@@ -298,9 +304,12 @@ def main(args):
                     model_output, src = model_output.to("cpu"), src.to("cpu")
                     model_output, src = model_output.to(dtype=torch.uint8), src.to(dtype=torch.uint8)
 
-                    # Save images
-                    Image.fromarray(model_output.permute(1, 2, 0).numpy()).save(f"{experiment_dir}/z_output.png")
-                    Image.fromarray(src.permute(1, 2, 0).numpy()).save(f"{experiment_dir}/z_input.png")
+                    outputs = torch.cat([src, model_output], dim=2).permute(1, 2, 0).numpy()
+                    outputs = Image.fromarray(outputs)
+                    outputs.save(f"{experiment_dir}/z_output_comparison.png")
+
+
+
                     
 
 

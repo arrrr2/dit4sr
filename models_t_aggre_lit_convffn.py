@@ -249,6 +249,7 @@ class DiT(nn.Module):
         cond_channels = None,
         x_channels=16,
         scale_factor=None,
+        vae_factor=8,
 
         **kwargs
     ):
@@ -280,9 +281,11 @@ class DiT(nn.Module):
 
         if scale_factor is not None:
             res_channels = in_channels - x_channels
+            
             self.cond_process = nn.Sequential(
-                nn.Upsample(scale_factor, mode='bicubic',),
-                nn.Conv2d(cond_channels, res_channels, kernel_size=5, padding=2),
+                nn.Upsample(scale_factor=scale_factor, mode='bicubic',),
+                nn.PixelUnshuffle(downscale_factor=vae_factor),
+                nn.Conv2d(cond_channels * vae_factor * vae_factor, res_channels, kernel_size=5, padding=2),
             )
         else:
             self.cond_process = nn.Identity()

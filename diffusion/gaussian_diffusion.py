@@ -1800,7 +1800,7 @@ class ResShiftDiffusion:
 
     def encode_first_stage(self, y, first_stage_model, up_sample=False):
         data_dtype = y.dtype
-        model_dtype = next(first_stage_model.parameters()).dtype
+        model_dtype = next(first_stage_model.model.parameters()).dtype
         if up_sample and self.sf != 1:
             y = torch.nn.functional.interpolate(y, scale_factor=self.sf, mode='bicubic')
         if first_stage_model is None:
@@ -1871,15 +1871,15 @@ class ResShiftDiffusion:
                 ModelMeanType.EPSILON: noise,
                 ModelMeanType.EPSILON_SCALE: noise*self.kappa*_extract_into_tensor(self.sqrt_etas, t, noise.shape),
             }[self.model_mean_type]
-            assert model_output.shape == target.shape == z_start.shape
-            terms["mse"] = mean_flat((target - model_output) ** 2)
+            assert model_output.shape == target.shape == z_start.shape, f"model_output.shape {model_output.shape}, target.shape {target.shape}, z_start.shape {z_start.shape} should be the same"
+            terms["loss"] = mean_flat((target - model_output) ** 2)
             if self.model_mean_type == ModelMeanType.EPSILON_SCALE:
-                terms["mse"] /= (self.kappa**2 * _extract_into_tensor(self.etas, t, t.shape))
+                terms["loss"] /= (self.kappa**2 * _extract_into_tensor(self.etas, t, t.shape))
             if self.loss_type == LossType.WEIGHTED_MSE:
                 weights = _extract_into_tensor(self.weight_loss_mse, t, t.shape)
             else:
                 weights = 1
-            terms["mse"] *= weights
+            terms["loss"] *= weights
         else:
             raise NotImplementedError(self.loss_type)
 
