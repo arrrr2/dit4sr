@@ -286,6 +286,7 @@ def main(args):
                     src = loss_dict["z_t"].detach()
                     
                     model_output, src = model_output[0], src[0]
+                    model_output, src = model_output.detach().clone(), src.detach().clone()
                     model_output, src = first_stage_model.decode(model_output), first_stage_model.decode(src)
 
                     model_output = model_output / 2 + 0.5

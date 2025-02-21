@@ -47,7 +47,7 @@ def create_diffusion(
 
 
 
-from .resshift_respace import SpacedDiffusion, resshift_space_timesteps, SpacedDiffusionDDPM
+from .resshift_respace import ResShiftSpacedDiffusion, resshift_space_timesteps, ResShiftSpacedDiffusionDDPM
 
 def create_resshift_diffusion(
     *,
@@ -87,7 +87,7 @@ def create_resshift_diffusion(
         model_mean_type = gd.ModelMeanType.RESIDUAL
     else:
         raise ValueError(f'Unknown Predicted type: {predict_type}')
-    return SpacedDiffusion(
+    return ResShiftSpacedDiffusion(
         use_timesteps=resshift_space_timesteps(steps, timestep_respacing),
         sqrt_etas=sqrt_etas,
         kappa=kappa,
@@ -117,7 +117,7 @@ def create_resshift_diffusion_ddpm(
         timestep_respacing = steps
     else:
         assert isinstance(timestep_respacing, int)
-    return SpacedDiffusionDDPM(
+    return ResShiftpacedDiffusionDDPM(
         use_timesteps=resshift_space_timesteps(steps, timestep_respacing),
         betas=betas,
         model_mean_type=(

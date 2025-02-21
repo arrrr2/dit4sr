@@ -17,7 +17,7 @@ def resshift_space_timesteps(num_timesteps, sample_timesteps):
     all_steps = [int((num_timesteps/sample_timesteps) * x) for x in range(sample_timesteps)]
     return set(all_steps)
 
-class SpacedDiffusion(ResShiftDiffusion):
+class ResShiftSpacedDiffusion(ResShiftDiffusion):
     """
     A diffusion process which can skip steps in a base diffusion process.
 
@@ -62,7 +62,7 @@ class _WrappedModel:
         new_ts = map_tensor[ts]
         return self.model(x, new_ts, **kwargs)
 
-class SpacedDiffusionDDPM(ResShiftDiffusionDDPM):
+class ResShiftSpacedDiffusionDDPM(ResShiftDiffusionDDPM):
     """
     A diffusion process which can skip steps in a base diffusion process.
 
